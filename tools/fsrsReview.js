@@ -7,6 +7,55 @@
  * LLM evaluates all responses at the end and updates FSRS variables.
  *
  * Isolated IIFE — zero external dependencies.
+ *
+ * ═════════════════════════════════════════════════════════════════════════
+ *                                WORKFLOW FLOWCHART
+ * ═════════════════════════════════════════════════════════════════════════
+ * 
+ *     ┌────────────────────────────────────────────────────────┐
+ *     │                   AI Smart Review Setup                 │
+ *     │  - Displays stats (Total, Due, In-Review cards)        │
+ *     │  - Input: RAG Topic Query & RAG Chunks Count (k)       │
+ *     └───────────────────────────┬────────────────────────────┘
+ *                                 │
+ *                                 ▼
+ *     ┌────────────────────────────────────────────────────────┐
+ *     │                Candidate Pre-filtering                 │
+ *     │  - Pulls all Review/Relearn cards (FSRS state !== 0)   │
+ *     │  - Queries RAG (embeddings/keywords) to grab top 'k'    │
+ *     │  - Merges selections & drops duplicate vector chunks    │
+ *     └───────────────────────────┬────────────────────────────┘
+ *                                 │
+ *                                 ▼
+ *     ┌────────────────────────────────────────────────────────┐
+ *     │             AI Question Generation (LLM)               │
+ *     │  - Passes selected vectors to LLM                      │
+ *     │  - LLM drafts a custom Bloom's Taxonomy question/card  │
+ *     └───────────────────────────┬────────────────────────────┘
+ *                                 │
+ *                                 ▼
+ *     ┌────────────────────────────────────────────────────────┐
+ *     │                   Active Study Phase                   │
+ *     │  - Zero-spoiler card view (source context collapsed)    │
+ *     │  - Student types text, speaks audio, or uploads work    │
+ *     │  - Moves to next card without intermediate feedback    │
+ *     └───────────────────────────┬────────────────────────────┘
+ *                                 │
+ *                                 ▼
+ *     ┌────────────────────────────────────────────────────────┐
+ *     │             AI Response Evaluation (LLM)               │
+ *     │  - LLM reviews final study package & student replies    │
+ *     │  - Multimodal assessment of uploaded math/written work │
+ *     │  - Assigns grade rating (1=Again, 2=Hard, 3=Good, 4=Easy)│
+ *     └───────────────────────────┬────────────────────────────┘
+ *                                 │
+ *                                 ▼
+ *     ┌────────────────────────────────────────────────────────┐
+ *     │                 FSRS Schedule Updates                  │
+ *     │  - Computes FSRS v4 memory parameters based on rating │
+ *     │  - Saves updated states back to IndexedDB database     │
+ *     │  - Profiles concept strengths and focuses              │
+ *     └────────────────────────────────────────────────────────┘
  */
 (function () {
     if (!window.NeuroSparkTools) window.NeuroSparkTools = [];
