@@ -1,4 +1,4 @@
-const CACHE_NAME = 'neurospark-cache-v30';
+const CACHE_NAME = 'neurospark-cache-v31';
 const ASSETS = [
   './',
   './index.html',
@@ -8,7 +8,7 @@ const ASSETS = [
   './webgpu.js',
   './tools/ragSearch.js',
   './tools/magicTodo.js',
-  './tools/htmlSimulator.js',
+  './tools/aiChatTutor.js',
   './tools/mermaidVisualizer.js',
   './tools/fsrsReview.js',
   './tools/focusReader.js',
