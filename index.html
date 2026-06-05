@@ -27,6 +27,12 @@
         window.transformers = { pipeline, env };
         console.log('[PWA] Transformers.js successfully initialized');
     </script>
+    <!-- PDF.js & Tesseract.js (Offline Document Parsing & OCR fallbacks) -->
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/tesseract.min.js"></script>
 </head>
 <body>
     <!-- Site Header -->
@@ -1210,6 +1216,55 @@
             return 'onnx-community/all-MiniLM-L6-v2-ONNX';
         }
 
+        // ----------------- PDF Parsing & OCR Helper Functions -----------------
+        async function extractTextFromPdf(arrayBuffer, onProgress) {
+            try {
+                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                let fullText = "";
+                
+                for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+                    if (onProgress) onProgress(pageNum, pdf.numPages, "Extracting text");
+                    const page = await pdf.getPage(pageNum);
+                    
+                    // Try to extract native text content
+                    const textContent = await page.getTextContent();
+                    let pageText = textContent.items.map(item => item.str).join(" ").trim();
+                    
+                    // If no text content is returned, it is likely a scanned, handwritten, or image-only page. Run OCR!
+                    if (!pageText) {
+                        if (onProgress) onProgress(pageNum, pdf.numPages, "Running OCR analysis");
+                        pageText = await runOcrOnPage(page);
+                    }
+                    
+                    fullText += pageText + "\n\n";
+                }
+                return fullText.trim();
+            } catch (err) {
+                console.error("[PDF Extraction] Error:", err);
+                throw new Error("Failed to extract text from PDF: " + err.message);
+            }
+        }
+
+        async function runOcrOnPage(page) {
+            const viewport = page.getViewport({ scale: 1.5 }); // Higher scale yields better OCR precision
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+            
+            await page.render({ canvasContext: context, viewport: viewport }).promise;
+            
+            if (!window.Tesseract) {
+                throw new Error("Tesseract OCR library is not loaded.");
+            }
+            
+            // Run standard english text recognition
+            const result = await Tesseract.recognize(canvas, 'eng', {
+                logger: m => console.log('[Tesseract Progress]', m)
+            });
+            return result.data.text;
+        }
+
         sourceFileInput.addEventListener('change', async (e) => {
             const files = e.target.files;
             if (files.length === 0) return;
@@ -1218,10 +1273,9 @@
             if (!deck) return;
             if (!deck.sources) deck.sources = [];
 
-            const allowedExtensions = ['txt', 'md', 'markdown', 'json', 'csv', 'html', 'htm'];
+            const allowedExtensions = ['txt', 'md', 'markdown', 'json', 'csv', 'html', 'htm', 'pdf'];
             const modelName = await getSelectedEmbeddingModel();
 
-            // Disable upload button and show status
             const originalBtnHtml = addSourceBtn.innerHTML;
             addSourceBtn.disabled = true;
             addSourceBtn.style.opacity = '0.7';
@@ -1232,32 +1286,53 @@
                     const fileExtension = file.name.split('.').pop().toLowerCase();
 
                     if (!allowedExtensions.includes(fileExtension)) {
-                        alert(`File "${file.name}" is not supported. Please upload only text-based files (.txt, .md, .json, .csv, .html).`);
+                        alert(`File "${file.name}" is not supported. Please upload only text (.txt, .md, .html, .json, .csv) or document (.pdf) files.`);
                         continue;
                     }
 
                     addSourceBtn.innerHTML = `<span>Processing...</span>`;
 
-                    // Use standard FileReader wrap in Promise to process sequentially
-                    const content = await new Promise((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onload = (event) => resolve(event.target.result);
-                        reader.onerror = (err) => reject(err);
-                        reader.readAsText(file);
-                    });
-
-                    // Update UI status inside the list box to give direct premium feedback
-                    const originalListBoxClass = sourcesListBox.className;
+                    // Update UI status inside the list box to give direct feedback
                     sourcesListBox.className = 'sources-list-box';
                     sourcesListBox.innerHTML = `
-                        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; color: var(--text-muted); font-size: 0.875rem;">
+                        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; color: var(--text-muted); font-size: 0.875rem; text-align: center; padding: 24px;">
                             <div class="status-dot" style="background-color: var(--primary-color); width: 12px; height: 12px; animation: badge-pulse 1.2s infinite ease-in-out;"></div>
-                            <span style="font-weight: 500; color: var(--text-color);">Analyzing & Chunking ${file.name}...</span>
-                            <span style="font-size: 0.75rem;">Embedding Model: ${modelName}</span>
+                            <span style="font-weight: 500; color: var(--text-color);">Parsing ${file.name}...</span>
+                            <span style="font-size: 0.75rem;">Model: ${modelName}</span>
                         </div>
                     `;
 
-                    // Chunk the content
+                    let content = "";
+                    if (fileExtension === 'pdf') {
+                        // Read PDF as ArrayBuffer
+                        const arrayBuffer = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = (event) => resolve(event.target.result);
+                            reader.onerror = (err) => reject(err);
+                            reader.readAsArrayBuffer(file);
+                        });
+                        
+                        // Parse PDF content and run OCR fallback if text is missing
+                        content = await extractTextFromPdf(arrayBuffer, (page, total, action) => {
+                            sourcesListBox.querySelector('span').textContent = `Parsing PDF: [Page ${page}/${total}] ${action}...`;
+                        });
+                    } else {
+                        // Read text files directly as text
+                        content = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = (event) => resolve(event.target.result);
+                            reader.onerror = (err) => reject(err);
+                            reader.readAsText(file);
+                        });
+                    }
+
+                    if (!content.trim()) {
+                        alert(`Warning: No readable text could be extracted from "${file.name}".`);
+                        continue;
+                    }
+
+                    // Chunk the extracted text
+                    sourcesListBox.querySelector('span').textContent = `Chunking ${file.name}...`;
                     const chunks = chunkText(content);
                     const chunkData = [];
 
@@ -1272,7 +1347,6 @@
                             });
                         } catch (err) {
                             console.error(`[Embeddings] Vector generation failed for chunk ${c}:`, err);
-                            // Fallback to empty vector if model fails to prevent blocking execution
                             chunkData.push({
                                 text: chunks[c],
                                 embedding: []
@@ -1295,13 +1369,12 @@
                 }
 
                 renderSources(deck);
-                alert("Files uploaded, chunked, and converted to vector embeddings successfully!");
+                alert("Files uploaded, analyzed, and vector embeddings generated successfully!");
             } catch (err) {
                 console.error("[Upload] Processing failed:", err);
                 alert("An error occurred during file processing: " + err.message);
                 renderSources(deck);
             } finally {
-                // Restore upload button state
                 addSourceBtn.disabled = false;
                 addSourceBtn.style.opacity = '1';
                 addSourceBtn.innerHTML = originalBtnHtml;
