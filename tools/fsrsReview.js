@@ -2,8 +2,9 @@
  * NeuroSpark Tool: FSRS Smart Review
  * Each vector chunk = an Anki-style spaced-repetition card.
  * Uses FSRS v4 algorithm to schedule reviews.
- * AI selects cards and generates quiz questions based on a custom study prompt.
- * Evaluates responses with LLM at the end and updates FSRS variables.
+ * AI selects cards using RAG (topic similarity) + FSRS states.
+ * AI generates study questions; user answers via text input.
+ * LLM evaluates all responses at the end and updates FSRS variables.
  *
  * Isolated IIFE — zero external dependencies.
  */
@@ -166,17 +167,83 @@
     }
 
     /* ══════════════════════════════════════════════════════
-       DUE CARD DISCOVERY & PRE-FILTERING
+       DUE CARD DISCOVERY & RAG SEARCH
      ══════════════════════════════════════════════════════ */
     function ensureFSRS(chunk) {
         if (!chunk.fsrs) chunk.fsrs = fsrsInit();
         return chunk;
     }
 
-    function isDue(chunk) {
-        ensureFSRS(chunk);
-        if (chunk.fsrs.state === 0) return true; // new card
-        return new Date(chunk.fsrs.due) <= new Date();
+    function cosineSimilarity(vecA, vecB) {
+        let dot = 0, normA = 0, normB = 0;
+        for (let i = 0; i < vecA.length; i++) {
+            dot += vecA[i] * vecB[i];
+            normA += vecA[i] * vecA[i];
+            normB += vecB[i] * vecB[i];
+        }
+        return normA && normB ? dot / (Math.sqrt(normA) * Math.sqrt(normB)) : 0;
+    }
+
+    function keywordMatchScore(text, query) {
+        const words = query.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w.length > 2);
+        if (words.length === 0) return 0;
+        const textLower = text.toLowerCase();
+        let matches = 0;
+        words.forEach(w => {
+            if (textLower.includes(w)) matches++;
+        });
+        return matches / words.length;
+    }
+
+    async function getRAGChunks(deck, query, k) {
+        if (!query || k <= 0) return [];
+        
+        const allChunks = [];
+        (deck.sources || []).forEach((src, si) => {
+            (src.chunks || []).forEach((chunk, ci) => {
+                allChunks.push({
+                    srcIdx: si, chunkIdx: ci,
+                    text: chunk.text,
+                    embedding: chunk.embedding,
+                    fsrs: chunk.fsrs || fsrsInit(),
+                    sourceName: src.name
+                });
+            });
+        });
+
+        if (allChunks.length === 0) return [];
+
+        try {
+            const apiConfig = await (window.dbStore ? window.dbStore.get('apiConfig') : null);
+            const modelName = apiConfig ? apiConfig.model || 'gemini-1.5-flash' : 'gemini-1.5-flash';
+            
+            if (typeof window.computeEmbedding === 'function') {
+                const queryVector = await window.computeEmbedding(query, modelName);
+                if (queryVector && queryVector.length > 0) {
+                    const scored = allChunks.map(chunk => {
+                        let sim = 0;
+                        if (chunk.embedding && chunk.embedding.length === queryVector.length) {
+                            sim = cosineSimilarity(queryVector, chunk.embedding);
+                        } else {
+                            sim = keywordMatchScore(chunk.text, query);
+                        }
+                        return { chunk, sim };
+                    });
+                    scored.sort((a, b) => b.sim - a.sim);
+                    return scored.slice(0, k).map(s => s.chunk);
+                }
+            }
+        } catch (err) {
+            console.warn('[FSRS] RAG embedding lookup failed, using keyword fallback:', err);
+        }
+
+        // Keyword Match Fallback
+        const scored = allChunks.map(chunk => {
+            const sim = keywordMatchScore(chunk.text, query);
+            return { chunk, sim };
+        });
+        scored.sort((a, b) => b.sim - a.sim);
+        return scored.slice(0, k).map(s => s.chunk);
     }
 
     function collectDueCards(deck) {
@@ -184,7 +251,8 @@
         (deck.sources || []).forEach((src, si) => {
             (src.chunks || []).forEach((chunk, ci) => {
                 ensureFSRS(chunk);
-                if (isDue(chunk)) {
+                const isDue = chunk.fsrs.state === 0 || new Date(chunk.fsrs.due) <= new Date();
+                if (isDue) {
                     due.push({
                         srcIdx: si, chunkIdx: ci,
                         text: chunk.text,
@@ -195,61 +263,6 @@
             });
         });
         return due;
-    }
-
-    function filterCandidates(deck, userQuery) {
-        const all = [];
-        (deck.sources || []).forEach((src, si) => {
-            (src.chunks || []).forEach((chunk, ci) => {
-                ensureFSRS(chunk);
-                all.push({
-                    srcIdx: si, chunkIdx: ci,
-                    text: chunk.text,
-                    fsrs: { ...chunk.fsrs },
-                    sourceName: src.name
-                });
-            });
-        });
-
-        if (all.length === 0) return [];
-
-        const queryWords = String(userQuery || '')
-            .toLowerCase()
-            .replace(/[^\w\s]/g, '')
-            .split(/\s+/)
-            .filter(w => w.length > 2);
-
-        const scored = all.map(card => {
-            let score = 0;
-            // Priorities: review/relearn states get base priority
-            if (card.fsrs.state !== 0) {
-                score += 50;
-            }
-            if (new Date(card.fsrs.due) <= new Date()) {
-                score += 30;
-            }
-            // Keyword matching
-            if (queryWords.length > 0) {
-                const cardTextLower = card.text.toLowerCase();
-                queryWords.forEach(word => {
-                    if (cardTextLower.includes(word)) {
-                        score += 25;
-                    }
-                });
-            }
-            return { card, score };
-        });
-
-        scored.sort((a, b) => b.score - a.score);
-
-        // Shuffle top subset to vary review patterns
-        const candidates = scored.map(s => s.card).slice(0, 30);
-        for (let i = candidates.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
-        }
-
-        return candidates.slice(0, MAX_SESSION);
     }
 
     function dueLabel(isoDate) {
@@ -272,15 +285,14 @@
 .fsr-progress-bar-wrap{height:5px;background:var(--bg-input);border-radius:99px;overflow:hidden;flex-shrink:0;}
 .fsr-progress-bar{height:100%;background:var(--primary-color);border-radius:99px;transition:width .4s ease;}
 .fsr-body{flex:1;display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0;padding-right:4px;}
-/* states */
-.fsr-phase{display:flex;flex-direction:column;gap:14px;height:100%;}
-.fsr-phase.hidden{display:none;}
 /* Setup card styles */
 .fsr-setup-card{background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:14px;box-shadow:var(--shadow-sm);margin-top:10px;}
 .fsr-setup-title{font-size:1rem;font-weight:700;color:var(--text-color);display:flex;align-items:center;gap:6px;}
 .fsr-setup-desc{font-size:.75rem;color:var(--text-muted);line-height:1.5;}
-.fsr-setup-input{width:100%;height:90px;padding:12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-color);font-size:.875rem;font-family:var(--font-sans);resize:none;outline:none;line-height:1.5;transition:all .15s ease-in-out;}
+.fsr-setup-input{width:100%;height:70px;padding:12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-color);font-size:.875rem;font-family:var(--font-sans);resize:none;outline:none;line-height:1.5;transition:all .15s ease-in-out;}
 .fsr-setup-input:focus{border-color:var(--primary-color);background:var(--bg-input-focus);box-shadow:0 0 0 2px rgba(99,102,241,0.15);}
+.fsr-setup-k-input{padding:10px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-color);font-size:.875rem;outline:none;transition:border-color .15s;width:100%;}
+.fsr-setup-k-input:focus{border-color:var(--primary-color);box-shadow:0 0 0 2px rgba(99,102,241,0.15);}
 .fsr-setup-stats{font-size:.75rem;color:var(--text-muted);display:flex;gap:16px;border-top:1px solid var(--border-color);padding-top:12px;margin-top:4px;}
 .fsr-setup-btn{padding:12px 24px;border-radius:8px;border:none;background:var(--primary-color);color:#fff;font-size:.875rem;font-weight:600;cursor:pointer;transition:all .15s ease;text-align:center;width:100%;}
 .fsr-setup-btn:hover{background:var(--primary-hover);transform:translateY(-1px);}
@@ -306,30 +318,9 @@
 .fsr-hint-content{display:none;margin-top:8px;font-size:.75rem;color:var(--text-muted);line-height:1.5;background:var(--bg-card);border-left:3px solid var(--primary-color);padding:10px 12px;border-radius:4px;max-height:160px;overflow-y:auto;}
 .fsr-hint-content.visible{display:block;}
 .fsr-question{font-size:.9rem;font-weight:600;color:var(--text-color);line-height:1.5;margin-top:4px;}
-/* options / MCQ */
-.fsr-options-grid{display:grid;grid-template-columns:1fr;gap:8px;margin-top:8px;flex-shrink:0;}
-.fsr-option-card{background:var(--bg-card);border:1px solid var(--border-color);border-radius:8px;padding:12px;font-size:.8125rem;color:var(--text-color);cursor:pointer;text-align:left;transition:all .12s ease;display:flex;align-items:center;gap:10px;width:100%;outline:none;}
-.fsr-option-card:hover:not(.disabled){border-color:var(--primary-color);background:var(--bg-hover);}
-.fsr-option-badge{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;border:1px solid var(--border-color);font-size:.75rem;font-weight:600;flex-shrink:0;color:var(--text-muted);}
-.fsr-option-card.selected{border-color:var(--primary-color);background:var(--bg-hover);}
-.fsr-option-card.correct{border-color:#10b981!important;background:rgba(16,185,129,0.08)!important;color:#065f46!important;font-weight:500;}
-body.dark-theme .fsr-option-card.correct{color:#a7f3d0!important;background:rgba(16,185,129,0.15)!important;}
-.fsr-option-card.incorrect{border-color:#ef4444!important;background:rgba(239,68,68,0.08)!important;color:#991b1b!important;}
-body.dark-theme .fsr-option-card.incorrect{color:#fca5a5!important;background:rgba(239,68,68,0.15)!important;}
-.fsr-option-card.disabled{cursor:not-allowed;opacity:.7;}
-/* Cloze & Fill Blank */
-.fsr-blank-row{display:flex;gap:8px;margin-top:8px;flex-shrink:0;}
-.fsr-blank-input{flex:1;padding:10px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-color);font-size:.8125rem;outline:none;transition:border-color .15s;}
-.fsr-blank-input:focus{border-color:var(--primary-color);}
-.fsr-blank-btn{padding:10px 16px;border-radius:8px;border:none;background:var(--primary-color);color:#fff;font-size:.8125rem;font-weight:600;cursor:pointer;transition:opacity .12s;}
-.fsr-blank-btn:hover{opacity:.9;}
-.fsr-blank-btn:disabled{opacity:.5;cursor:not-allowed;}
-.fsr-blank-feedback{display:flex;align-items:center;gap:6px;font-size:.8125rem;font-weight:600;margin-top:6px;}
-.fsr-blank-feedback.correct{color:#10b981;}
-.fsr-blank-feedback.incorrect{color:#ef4444;}
-/* Short Answer / Textarea / Front-back input */
+/* Short Answer / Textarea */
 .fsr-answer-wrap{display:flex;flex-direction:column;gap:8px;flex-shrink:0;margin-top:8px;}
-.fsr-answer{width:100%;min-height:80px;padding:10px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-color);font-size:.8125rem;font-family:var(--font-sans);resize:none;outline:none;line-height:1.5;transition:border-color .15s;}
+.fsr-answer{width:100%;min-height:90px;padding:10px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-color);font-size:.8125rem;font-family:var(--font-sans);resize:none;outline:none;line-height:1.5;transition:border-color .15s;}
 .fsr-answer:focus{border-color:var(--primary-color);}
 .fsr-media-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 .fsr-media-btn{display:flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;border:1px solid var(--border-color);background:none;color:var(--text-muted);font-size:.75rem;cursor:pointer;transition:all .12s;}
@@ -339,11 +330,8 @@ body.dark-theme .fsr-option-card.incorrect{color:#fca5a5!important;background:rg
 .fsr-audio-chip{display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:20px;border:1px solid var(--border-color);font-size:.6875rem;color:var(--text-muted);}
 .fsr-audio-chip.recording{border-color:#ef4444;color:#ef4444;animation:badge-pulse 1s infinite;}
 .fsr-remove-btn{background:none;border:none;color:var(--text-muted);cursor:pointer;padding:0;font-size:.75rem;line-height:1;}
-/* general explanation box */
-.fsr-explanation-box{margin-top:10px;padding:12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:8px;font-size:.75rem;line-height:1.5;animation:fsrFadeIn .25s ease;}
-.fsr-explanation-title{font-weight:700;color:var(--text-label);margin-bottom:4px;display:flex;align-items:center;gap:4px;}
 
-.fsr-next-btn{padding:9px 22px;border-radius:8px;border:none;background:var(--primary-color);color:#fff;font-size:.875rem;font-weight:600;cursor:pointer;transition:opacity .15s;align-self:flex-end;margin-top:10px;}
+.fsr-next-btn{padding:10px 22px;border-radius:8px;border:none;background:var(--primary-color);color:#fff;font-size:.875rem;font-weight:600;cursor:pointer;transition:opacity .15s;align-self:flex-end;margin-top:10px;}
 .fsr-next-btn:hover{opacity:.95;}
 .fsr-next-btn:disabled{opacity:.5;cursor:not-allowed;}
 .fsr-card-counter{font-size:.6875rem;color:var(--text-muted);align-self:flex-start;margin-top:-6px;}
@@ -388,7 +376,7 @@ body.dark-theme .fsr-option-card.incorrect{color:#fca5a5!important;background:rg
     const toolDefinition = {
         id: 'fsrs-review',
         name: 'Smart Review',
-        description: 'FSRS spaced repetition — AI-customized reviews & structured quizzes with automated final LLM grading.',
+        description: 'FSRS spaced repetition — AI RAG search + due cards study with final LLM response grading.',
         icon: TOOL_ICON,
 
         render(container, deck, onBack) {
@@ -406,9 +394,21 @@ body.dark-theme .fsr-option-card.incorrect{color:#fca5a5!important;background:rg
   <!-- SETUP phase -->
   <div class="fsr-phase" id="fsrPhaseSetup">
     <div class="fsr-setup-card">
-      <div class="fsr-setup-title">🎯 Custom Study Goal</div>
-      <div class="fsr-setup-desc">Tell the AI what you want to study today (e.g. topic request, target card counts) or leave it blank to study all due/relearn cards automatically.</div>
-      <textarea class="fsr-setup-input" id="fsrSetupInput" placeholder="e.g. I want to study Machine Learning today. Give me at least 5 ML cards + all review or relearn cards."></textarea>
+      <div class="fsr-setup-title">🎯 AI Smart Review Setup</div>
+      <div class="fsr-setup-desc">Enter a topic query to fetch relevant cards via RAG, and select how many cards to retrieve. All of your review and relearn cards will be included automatically.</div>
+      
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <label style="font-size: 0.75rem; font-weight: 600; color: var(--text-label);">RAG Topic Query</label>
+        <textarea class="fsr-setup-input" id="fsrSetupInput" placeholder="e.g. cellular respiration, organic chemistry..."></textarea>
+      </div>
+
+      <div style="display: flex; gap: 12px; align-items: center;">
+        <div style="display: flex; flex-direction: column; gap: 6px; flex: 1;">
+          <label style="font-size: 0.75rem; font-weight: 600; color: var(--text-label);">Number of RAG Chunks (k)</label>
+          <input type="number" class="fsr-setup-k-input" id="fsrSetupKInput" value="5" min="1" max="15">
+        </div>
+      </div>
+
       <div class="fsr-setup-stats" id="fsrSetupStats">Scanning deck...</div>
       <button class="fsr-setup-btn" id="fsrStartBtn">Start AI Smart Review</button>
     </div>
@@ -463,7 +463,7 @@ body.dark-theme .fsr-option-card.incorrect{color:#fca5a5!important;background:rg
             /* ── session state ── */
             let dueCards   = [];
             let questions  = [];
-            let answers    = [];   // { text, firstTryCorrect, images, audioText }
+            let answers    = [];   // { text, images, audioText }
             let currentIdx = 0;
             let mediaRecorder = null;
             let audioChunks   = [];
@@ -493,13 +493,14 @@ body.dark-theme .fsr-option-card.incorrect{color:#fca5a5!important;background:rg
 
             container.querySelector('#fsrStartBtn').addEventListener('click', () => {
                 const userQuery = container.querySelector('#fsrSetupInput').value.trim();
-                startDiscover(userQuery);
+                const kVal = parseInt(container.querySelector('#fsrSetupKInput').value) || 5;
+                startDiscover(userQuery, kVal);
             });
 
-            /* ══ PHASE 1: DISCOVER (PRE-FILTERING) ══ */
-            async function startDiscover(userQuery) {
+            /* ══ PHASE 1: DISCOVER (RAG + FSRS) ══ */
+            async function startDiscover(userQuery, kVal) {
                 showPhase('Discover');
-                container.querySelector('#fsrDiscoverMsg').textContent = 'Filtering candidates based on your request...';
+                container.querySelector('#fsrDiscoverMsg').textContent = 'Fetching and merging cards...';
 
                 if (!deck.sources || deck.sources.length === 0) {
                     showPhase('Empty');
@@ -507,55 +508,78 @@ body.dark-theme .fsr-option-card.incorrect{color:#fca5a5!important;background:rg
                     return;
                 }
 
-                const candidates = filterCandidates(deck, userQuery);
+                // 1. Collect all review & relearn cards
+                const reviewRelearn = [];
+                (deck.sources || []).forEach((src, si) => {
+                    (src.chunks || []).forEach((chunk, ci) => {
+                        ensureFSRS(chunk);
+                        if (chunk.fsrs.state !== 0) {
+                            reviewRelearn.push({
+                                srcIdx: si, chunkIdx: ci,
+                                text: chunk.text,
+                                fsrs: { ...chunk.fsrs },
+                                sourceName: src.name
+                            });
+                        }
+                    });
+                });
 
-                if (candidates.length === 0) {
+                // 2. Fetch RAG cards
+                const ragCards = await getRAGChunks(deck, userQuery, kVal);
+
+                // Merge (avoid duplicates)
+                const selectedMap = new Map();
+                reviewRelearn.forEach(c => {
+                    selectedMap.set(`${c.srcIdx}-${c.chunkIdx}`, c);
+                });
+                ragCards.forEach(c => {
+                    selectedMap.set(`${c.srcIdx}-${c.chunkIdx}`, c);
+                });
+
+                dueCards = Array.from(selectedMap.values());
+
+                if (dueCards.length === 0) {
+                    // Fallback to standard due cards
+                    dueCards = collectDueCards(deck).slice(0, MAX_SESSION);
+                }
+
+                if (dueCards.length === 0) {
                     showPhase('Empty');
                     return;
                 }
 
-                await generateQuestions(candidates, userQuery || 'Review all due cards.');
+                await generateQuestions();
             }
 
-            /* ══ PHASE 2: GENERATE QUESTIONS (SINGLE LLM SELECTION + DRAFT) ══ */
-            async function generateQuestions(candidates, userQuery) {
+            /* ══ PHASE 2: GENERATE QUESTIONS (CONCEPTUAL QUESTIONS) ══ */
+            async function generateQuestions() {
                 showPhase('Generating');
-                container.querySelector('#fsrGeneratingMsg').textContent = `AI is selecting cards and designing questions...`;
+                const total = dueCards.length;
+                container.querySelector('#fsrGeneratingMsg').textContent = `AI is designing conceptual questions for ${total} cards...`;
 
-                const chunkList = candidates.map((c, i) =>
-                    `Candidate Card ${i} [Source: ${c.sourceName}, FSRS State: ${c.fsrs.state}, Due: ${dueLabel(c.fsrs.due)}]:\n"""\n${c.text.slice(0, 500)}\n"""`
+                const chunkList = dueCards.map((c, i) =>
+                    `Card ${i} [Source: ${c.sourceName}]:\n"""\n${c.text.slice(0, 600)}\n"""`
                 ).join('\n\n---\n\n');
 
-                const prompt = `You are an expert study assistant designing a customized spaced-repetition quiz.
-The student has submitted this study request:
-"${userQuery}"
+                const prompt = `You are an expert tutor designing conceptual review questions.
+For each of the ${total} cards below, generate exactly ONE conceptual question.
 
-We have filtered a candidate pool of ${candidates.length} cards from their documents:
+IMPORTANT:
+- The question must test understanding of the concepts or examples in the card.
+- DO NOT mention the correct answer or spoil the question in the question text.
+- Return ONLY the question and a reference correct answer.
+
+Cards:
 ${chunkList}
-
-Your task is to select a subset of these cards (up to 15 cards) that best satisfy the student's request, prioritizing:
-1. All cards in a review or relearn state (FSRS State !== 0).
-2. Additional cards matching the requested topic/instructions.
-
-For each selected card, generate exactly ONE question. Use a variety of question types appropriate for the content:
-- "mcq" (Multiple Choice Question): Provide 4 options, correctAnswer must be one of the options.
-- "text_input": Short Answer. Ask for a brief explanation or definition.
-- "front_back": Flashcard style. Ask a front question (e.g. "What is the capital of France?" or "How does X affect Y?").
-- "cloze": Cloze deletion. A statement with a key term replaced by "_______".
-
-Ensure all questions test conceptual understanding or application of examples rather than simple text retrieval.
 
 Return ONLY a valid JSON object matching this schema (no markdown, no other text):
 {
-  "selected": [
+  "questions": [
     {
-      "candidateIdx": 0, // The candidate card index (0 to ${candidates.length - 1})
-      "type": "mcq | text_input | front_back | cloze",
-      "question": "The question text...",
-      "options": ["Option A", "Option B", "Option C", "Option D"], // Only for mcq, empty array otherwise
+      "idx": 0,
+      "question": "The conceptual question...",
       "correctAnswer": "The reference correct answer...",
-      "explanation": "Detailed explanation of the concept...",
-      "concept": "Concept Name (e.g., Neural Networks)"
+      "concept": "Concept Name (e.g., Photosynthesis)"
     }
   ]
 }`;
@@ -563,42 +587,27 @@ Return ONLY a valid JSON object matching this schema (no markdown, no other text
                 try {
                     const raw  = await callAI(prompt);
                     const data = parseJSON(raw);
-                    const selectedList = data.selected || [];
+                    questions  = data.questions || [];
 
-                    dueCards = [];
-                    questions = [];
-
-                    selectedList.forEach(item => {
-                        const idx = parseInt(item.candidateIdx);
-                        if (candidates[idx]) {
-                            dueCards.push(candidates[idx]);
-                            questions.push(item);
-                        }
-                    });
-
-                    if (dueCards.length === 0) {
-                        throw new Error('AI did not select any valid cards');
+                    if (questions.length !== total) {
+                        throw new Error('Incomplete question count returned');
                     }
                 } catch (err) {
-                    console.warn('[FSRS] Question selection fallback:', err);
-                    // Fallback to due cards directly
-                    dueCards = candidates.slice(0, 10);
+                    console.warn('[FSRS] Question generation failed, falling back:', err);
                     questions = dueCards.map((c, i) => ({
-                        candidateIdx: i,
-                        type: 'text_input',
-                        question: `Explain and verify your understanding of: "${c.text.slice(0, 100)}..."`,
+                        idx: i,
+                        question: `Explain and verify your understanding of the concept in: "${c.text.slice(0, 100)}..."`,
                         correctAnswer: c.text,
-                        explanation: 'Review the source material to assess your knowledge.',
-                        concept: 'Recall Practice'
+                        concept: 'Concept Review'
                     }));
                 }
 
-                answers = dueCards.map(() => ({ text: '', firstTryCorrect: null, images: [], audioText: '' }));
+                answers = dueCards.map(() => ({ text: '', images: [], audioText: '' }));
                 currentIdx = 0;
                 startReview();
             }
 
-            /* ══ PHASE 3: REVIEW LOOP ══ */
+            /* ══ PHASE 3: REVIEW LOOP (FRONT QUESTION + TEXT BOX INPUT) ══ */
             function startReview() {
                 showPhase('Review');
                 renderStats();
@@ -646,8 +655,25 @@ Return ONLY a valid JSON object matching this schema (no markdown, no other text
                     </div>
                 </div>
                 
-                <div id="fsrInteractionArea"></div>
-                <div id="fsrExplanationArea"></div>`;
+                <div class="fsr-answer-wrap">
+                    <textarea class="fsr-answer" id="fsrAnswerText" placeholder="Type your answer here..." spellcheck="true">${escHTML(ans.text)}</textarea>
+
+                    <div class="fsr-media-row">
+                        <label class="fsr-media-btn" for="fsrImgInput" title="Attach image">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Image
+                        </label>
+                        <input type="file" id="fsrImgInput" accept="image/*" multiple style="display:none;">
+                        <button class="fsr-media-btn" id="fsrAudioBtn" title="Record audio">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                            <span id="fsrAudioLabel">Record</span>
+                        </button>
+                        <div class="fsr-media-preview" id="fsrMediaPreview"></div>
+                    </div>
+
+                    <button class="fsr-next-btn" id="fsrNextBtn">
+                        ${idx < dueCards.length - 1 ? 'Next Card →' : '✅ Finish & AI Grade'}
+                    </button>
+                </div>`;
 
                 body.innerHTML = html;
 
@@ -659,187 +685,25 @@ Return ONLY a valid JSON object matching this schema (no markdown, no other text
                     hintToggle.textContent = isVisible ? '💡 Hide Source Context' : '💡 View Source Context';
                 });
 
-                renderInteraction(idx, q, ans);
-            }
+                // Input handling
+                const textarea = body.querySelector('#fsrAnswerText');
+                textarea.addEventListener('input', () => { answers[idx].text = textarea.value; });
+                textarea.focus();
 
-            function renderInteraction(idx, q, ans) {
-                const area = container.querySelector('#fsrInteractionArea');
-                const explArea = container.querySelector('#fsrExplanationArea');
-
-                if (q.type === 'mcq') {
-                    let optionsHTML = (q.options || []).map((opt, oIdx) => {
-                        const letter = String.fromCharCode(65 + oIdx);
-                        return `
-                        <button class="fsr-option-card" data-index="${oIdx}">
-                            <span class="fsr-option-badge">${letter}</span>
-                            <span style="line-height: 1.3;">${escHTML(opt)}</span>
-                        </button>`;
-                    }).join('');
-
-                    area.innerHTML = `
-                    <div class="fsr-options-grid">
-                        ${optionsHTML}
-                    </div>
-                    <button class="fsr-next-btn hidden" id="fsrNextBtn">Next Question →</button>`;
-
-                    const optBtns = area.querySelectorAll('.fsr-option-card');
-                    optBtns.forEach(btn => {
-                        btn.addEventListener('click', () => {
-                            if (ans.firstTryCorrect !== null) return;
-                            const selectedIdx = parseInt(btn.getAttribute('data-index'));
-                            const selectedVal = q.options[selectedIdx];
-                            const correctVal  = q.correctAnswer;
-
-                            const isCorrect = (selectedVal === correctVal || selectedIdx === q.options.indexOf(correctVal));
-                            ans.firstTryCorrect = isCorrect;
-                            ans.text = selectedVal;
-
-                            optBtns.forEach((b, bIdx) => {
-                                b.classList.add('disabled');
-                                const val = q.options[bIdx];
-                                if (val === correctVal || bIdx === q.options.indexOf(correctVal)) {
-                                    b.classList.add('correct');
-                                } else if (bIdx === selectedIdx) {
-                                    b.classList.add('incorrect');
-                                }
-                            });
-
-                            explArea.innerHTML = `
-                            <div class="fsr-explanation-box">
-                                <div class="fsr-explanation-title">📝 Reference Details</div>
-                                <div>${escHTML(q.explanation || 'Study the details in the source card.')}</div>
-                            </div>`;
-
-                            const nextBtn = area.querySelector('#fsrNextBtn');
-                            nextBtn.classList.remove('hidden');
-                            nextBtn.focus();
-                        });
-                    });
-
-                    area.querySelector('#fsrNextBtn').addEventListener('click', advanceCard);
-
-                } else if (q.type === 'cloze') {
-                    area.innerHTML = `
-                    <div class="fsr-blank-row">
-                        <input type="text" class="fsr-blank-input" id="fsrBlankInput" placeholder="Type your answer here..." autocomplete="off">
-                        <button class="fsr-blank-btn" id="fsrBlankSubmit">Check</button>
-                    </div>
-                    <div id="fsrBlankFeedback"></div>
-                    <button class="fsr-next-btn hidden" id="fsrNextBtn">Next Question →</button>`;
-
-                    const input  = area.querySelector('#fsrBlankInput');
-                    const submit = area.querySelector('#fsrBlankSubmit');
-                    const fb     = area.querySelector('#fsrBlankFeedback');
-
-                    function checkAnswer() {
-                        if (ans.firstTryCorrect !== null) return;
-                        const userVal = input.value.trim();
-                        if (!userVal) return;
-
-                        const clean = (str) => String(str || '')
-                            .toLowerCase()
-                            .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"")
-                            .replace(/\s+/g," ")
-                            .trim();
-
-                        const correctVal = q.correctAnswer;
-                        const isCorrect = (clean(userVal) === clean(correctVal));
-
-                        ans.firstTryCorrect = isCorrect;
-                        ans.text = userVal;
-
-                        input.disabled = true;
-                        submit.disabled = true;
-
-                        if (isCorrect) {
-                            fb.className = 'fsr-blank-feedback correct';
-                            fb.innerHTML = '✨ Correct!';
-                        } else {
-                            fb.className = 'fsr-blank-feedback incorrect';
-                            fb.innerHTML = `❌ Incorrect. Reference: <strong>${escHTML(correctVal)}</strong>`;
-                        }
-
-                        explArea.innerHTML = `
-                        <div class="fsr-explanation-box">
-                            <div class="fsr-explanation-title">📝 Reference Details</div>
-                            <div>${escHTML(q.explanation || 'Study the details in the source card.')}</div>
-                        </div>`;
-
-                        const nextBtn = area.querySelector('#fsrNextBtn');
-                        nextBtn.classList.remove('hidden');
-                        nextBtn.focus();
+                // Media previews
+                renderMediaPreview(idx);
+                const imgInput = body.querySelector('#fsrImgInput');
+                imgInput.addEventListener('change', async () => {
+                    for (const f of [...imgInput.files]) {
+                        const b64 = await fileToBase64(f);
+                        ans.images.push(b64);
                     }
-
-                    submit.addEventListener('click', checkAnswer);
-                    input.addEventListener('keydown', e => {
-                        if (e.key === 'Enter') { e.preventDefault(); checkAnswer(); }
-                    });
-                    input.focus();
-
-                    area.querySelector('#fsrNextBtn').addEventListener('click', advanceCard);
-
-                } else {
-                    // text_input or front_back — both take text/voice/media responses
-                    const buttonLabel = q.type === 'front_back' ? 'Reveal Back' : 'Submit Answer';
-                    const answerPlaceholder = q.type === 'front_back' ? 'Formulate your response (optional)...' : 'Type your detailed answer...';
-
-                    area.innerHTML = `
-                    <div class="fsr-answer-wrap">
-                        <textarea class="fsr-answer" id="fsrAnswerText" placeholder="${answerPlaceholder}" spellcheck="true">${escHTML(ans.text)}</textarea>
-
-                        <div class="fsr-media-row">
-                            <label class="fsr-media-btn" for="fsrImgInput" title="Attach image">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Image
-                            </label>
-                            <input type="file" id="fsrImgInput" accept="image/*" multiple style="display:none;">
-                            <button class="fsr-media-btn" id="fsrAudioBtn" title="Record audio">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-                                <span id="fsrAudioLabel">Record</span>
-                            </button>
-                            <div class="fsr-media-preview" id="fsrMediaPreview"></div>
-                        </div>
-
-                        <button class="fsr-next-btn" style="align-self:flex-start; margin-top:2px;" id="fsrSubmitBtn">${buttonLabel}</button>
-                        <button class="fsr-next-btn hidden" id="fsrNextBtn">Next Question →</button>
-                    </div>`;
-
-                    const textarea  = area.querySelector('#fsrAnswerText');
-                    const submitBtn = area.querySelector('#fsrSubmitBtn');
-                    const nextBtn   = area.querySelector('#fsrNextBtn');
-
-                    textarea.addEventListener('input', () => { ans.text = textarea.value; });
-                    textarea.focus();
-
                     renderMediaPreview(idx);
-                    const imgInput = area.querySelector('#fsrImgInput');
-                    imgInput.addEventListener('change', async () => {
-                        for (const f of [...imgInput.files]) {
-                            const b64 = await fileToBase64(f);
-                            ans.images.push(b64);
-                        }
-                        renderMediaPreview(idx);
-                    });
-                    area.querySelector('#fsrAudioBtn').addEventListener('click', (e) => toggleRecord(idx, e.currentTarget));
+                });
+                body.querySelector('#fsrAudioBtn').addEventListener('click', (e) => toggleRecord(idx, e.currentTarget));
 
-                    submitBtn.addEventListener('click', () => {
-                        ans.text = textarea.value;
-                        textarea.disabled = true;
-                        submitBtn.classList.add('hidden');
-                        nextBtn.classList.remove('hidden');
-                        nextBtn.focus();
-
-                        const labelText = q.type === 'front_back' ? '🔑 Flashcard Back' : '🔑 Correct Answer';
-                        explArea.innerHTML = `
-                        <div class="fsr-explanation-box">
-                            <div class="fsr-explanation-title">${labelText}</div>
-                            <div style="font-weight: 500; margin-bottom: 8px;">${escHTML(q.correctAnswer)}</div>
-                            <div class="fsr-explanation-title">📝 Explanation</div>
-                            <div>${escHTML(q.explanation || 'Review the reference solution details.')}</div>
-                        </div>`;
-                    });
-
-                    nextBtn.addEventListener('click', advanceCard);
-                }
+                // Next button click
+                body.querySelector('#fsrNextBtn').addEventListener('click', advanceCard);
             }
 
             function renderMediaPreview(idx) {
@@ -921,6 +785,9 @@ Return ONLY a valid JSON object matching this schema (no markdown, no other text
             }
 
             function advanceCard() {
+                const ta = container.querySelector('#fsrAnswerText');
+                if (ta) answers[currentIdx].text = ta.value;
+
                 currentIdx++;
                 if (currentIdx >= dueCards.length) {
                     applyResultsAndFinish();
@@ -935,7 +802,7 @@ Return ONLY a valid JSON object matching this schema (no markdown, no other text
                 showPhase('Grading');
                 container.querySelector('#fsrGradingMsg').textContent = 'LLM is grading your answers and saving progress...';
 
-                // Collect attached images
+                // Collect images
                 const allImages = [];
                 answers.forEach(a => { if (a.images.length) allImages.push(...a.images); });
                 const gradingImages = allImages.slice(0, 4);
@@ -946,7 +813,6 @@ Return ONLY a valid JSON object matching this schema (no markdown, no other text
                     const hasAudio = a.audioText ? `\n[Spoken answer transcription]: ${a.audioText}` : '';
                     const hasImg = a.images.length ? `\n[${a.images.length} image(s) attached]` : '';
                     return `Card ${i + 1} [Concept: ${q.concept}]:
-Question Type: ${q.type}
 Question: ${q.question}
 Reference Answer: ${q.correctAnswer}
 Student Answer: "${a.text || '(blank)'}${hasAudio}${hasImg}"`;
@@ -962,9 +828,7 @@ Grade each card response on the standard FSRS rating scale (1 to 4):
 Student Responses:
 ${sessionSummary}
 
-Rules:
-- MCQ or Cloze selections: If student got it right (verified by their answer matching correct answer), give a 3 or 4. If wrong or blank, give a 1.
-- Open-ended answers (text_input/front_back): Compare student explanation to the reference correct answer. Give partial credit (rating 2) if on the right track, 3 or 4 for accurate recalls.
+Compare the student's answer to the reference answer. Give partial credit (rating 2) if on the right track, 3 or 4 for accurate recalls.
 
 Return ONLY a valid JSON object (no markdown prefix, no surrounding text):
 {
@@ -972,13 +836,13 @@ Return ONLY a valid JSON object (no markdown prefix, no surrounding text):
     {
       "idx": 0,
       "rating": 3,
-      "comment": "Correct. Good explanation."
+      "comment": "Correct. Good explanation of concept."
     }
   ],
   "score": 85,
-  "weaknesses": ["Neuroscience definitions need review"],
+  "weaknesses": ["Concept X definitions need review"],
   "feedback": "Overall summary review feedback here in 2-3 sentences.",
-  "strengths": ["Excellent conceptual understanding of Machine Learning principles"]
+  "strengths": ["Excellent conceptual understanding of Y principles"]
 }`;
 
                 try {
@@ -1041,11 +905,6 @@ Return ONLY a valid JSON object (no markdown prefix, no surrounding text):
                     const comment = result.grades && result.grades[i] ? result.grades[i].comment : '';
                     const newFSRS = deck.sources[card.srcIdx].chunks[card.chunkIdx].fsrs;
 
-                    let userAnswerText = `Your Answer: "${a.text || '(none)'}"`;
-                    if (q.type === 'mcq' || q.type === 'cloze') {
-                        userAnswerText += ` · ${a.firstTryCorrect ? '✅ Correct' : '❌ Incorrect'}`;
-                    }
-
                     return `
                     <div class="fsr-card-result">
                         <div class="fsr-result-header">
@@ -1056,7 +915,7 @@ Return ONLY a valid JSON object (no markdown prefix, no surrounding text):
                             </div>
                         </div>
                         <div class="fsr-result-q"><strong>Q:</strong> ${escHTML(q.question)}</div>
-                        <div class="fsr-result-comment" style="margin-top: 2px;">${escHTML(userAnswerText)}</div>
+                        <div class="fsr-result-comment" style="margin-top: 2px;">Your Answer: "${escHTML(a.text || '(none)')}"</div>
                         <div class="fsr-result-comment" style="opacity:0.85;"><strong>Correct answer:</strong> ${escHTML(q.correctAnswer)}</div>
                         ${comment ? `<div class="fsr-result-comment" style="color:var(--primary-color); font-weight: 500;"><strong>Evaluation:</strong> ${escHTML(comment)}</div>` : ''}
                         ${q.explanation ? `<div class="fsr-result-comment" style="font-style: italic; border-top:1px dashed var(--border-color); padding-top:4px; margin-top:4px;">${escHTML(q.explanation)}</div>` : ''}
@@ -1075,7 +934,7 @@ Return ONLY a valid JSON object (no markdown prefix, no surrounding text):
                     </svg>
                     <div class="fsr-score-info">
                         <div class="fsr-score-pct">${score >= 80 ? '🎉 Study Completed!' : score >= 55 ? '📈 Solid Effort!' : '💪 Practice makes perfect!'}</div>
-                        <div class="fsr-score-sub">${dueCards.length} card${dueCards.length > 1 ? 's' : ''} reviewed · FSRS states synced.</div>
+                        <div class="fsr-score-sub">${dueCards.length} card${dueCards.length > 1 ? 's' : ''} reviewed · FSRS memory states updated.</div>
                     </div>
                 </div>
 
