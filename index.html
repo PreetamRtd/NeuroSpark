@@ -24,6 +24,7 @@
     <script type="module">
         import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.1';
         env.allowLocalModels = false;
+        env.backends.onnx.wasm.proxy = false;
         window.transformers = { pipeline, env };
         console.log('[PWA] Transformers.js successfully initialized');
     </script>
@@ -509,7 +510,8 @@
                 'https://huggingface.co/google/gemma-2-2b-it/resolve/main/config.json',
                 'https://huggingface.co/google/gemma-2-2b-it/resolve/main/tokenizer.json',
                 'https://huggingface.co/google/gemma-2-2b-it/resolve/main/tokenizer_config.json',
-                'https://huggingface.co/google/gemma-2-2b-it/resolve/main/model.onnx'
+                'https://huggingface.co/google/gemma-2-2b-it/resolve/main/model.onnx',
+                'https://huggingface.co/google/gemma-2-2b-it/resolve/main/model.onnx_data'
             ]
         };
 
