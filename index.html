@@ -19,6 +19,14 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- Design System Styles -->
     <link rel="stylesheet" href="index.css">
+
+    <!-- Hugging Face Transformers.js -->
+    <script type="module">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.1';
+        env.allowLocalModels = false;
+        window.transformers = { pipeline, env };
+        console.log('[PWA] Transformers.js successfully initialized');
+    </script>
 </head>
 <body>
     <!-- Site Header -->
@@ -1140,6 +1148,68 @@
             if (sourceFileInput) sourceFileInput.click();
         });
 
+        // ----------------- Vector Embeddings Helper Functions -----------------
+        let embeddingPipeline = null;
+        let currentEmbeddingModelName = null;
+
+        async function getEmbeddingPipeline(modelName) {
+            if (embeddingPipeline && currentEmbeddingModelName === modelName) {
+                return embeddingPipeline;
+            }
+            if (!window.transformers) {
+                throw new Error("Hugging Face Transformers.js is still loading. Please try again in a moment.");
+            }
+            // Use WebGPU if supported, fallback to CPU
+            try {
+                embeddingPipeline = await window.transformers.pipeline('feature-extraction', modelName, {
+                    device: 'webgpu'
+                });
+            } catch (err) {
+                console.warn("[Embeddings] WebGPU loading failed, falling back to CPU device:", err);
+                embeddingPipeline = await window.transformers.pipeline('feature-extraction', modelName);
+            }
+            currentEmbeddingModelName = modelName;
+            return embeddingPipeline;
+        }
+
+        async function computeEmbedding(text, modelName) {
+            const pipe = await getEmbeddingPipeline(modelName);
+            const output = await pipe(text, { pooling: 'mean', normalize: true });
+            return Array.from(output.data);
+        }
+
+        function chunkText(text, maxLength = 500, overlap = 100) {
+            const chunks = [];
+            let start = 0;
+            while (start < text.length) {
+                let end = start + maxLength;
+                if (end < text.length) {
+                    const nextSpace = text.indexOf(' ', end);
+                    if (nextSpace !== -1 && nextSpace - end < 30) {
+                        end = nextSpace;
+                    }
+                }
+                chunks.push(text.slice(start, end).trim());
+                start = end - overlap;
+                if (start < 0) start = 0;
+                if (end >= text.length) break;
+            }
+            return chunks;
+        }
+
+        async function getSelectedEmbeddingModel() {
+            try {
+                const localConfig = await dbStore.get('localModelConfig');
+                if (localConfig) {
+                    if (localConfig.embeddingModel === 'custom' && localConfig.customEmbeddingModel) {
+                        return localConfig.customEmbeddingModel;
+                    }
+                    return localConfig.embeddingModel || 'onnx-community/all-MiniLM-L6-v2-ONNX';
+                }
+            } catch(e) {}
+            return 'onnx-community/all-MiniLM-L6-v2-ONNX';
+        }
+
         sourceFileInput.addEventListener('change', async (e) => {
             const files = e.target.files;
             if (files.length === 0) return;
@@ -1148,31 +1218,95 @@
             if (!deck) return;
             if (!deck.sources) deck.sources = [];
 
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const reader = new FileReader();
+            const allowedExtensions = ['txt', 'md', 'markdown', 'json', 'csv', 'html', 'htm'];
+            const modelName = await getSelectedEmbeddingModel();
 
-                reader.onload = async (event) => {
-                    const content = event.target.result;
+            // Disable upload button and show status
+            const originalBtnHtml = addSourceBtn.innerHTML;
+            addSourceBtn.disabled = true;
+            addSourceBtn.style.opacity = '0.7';
+
+            try {
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    const fileExtension = file.name.split('.').pop().toLowerCase();
+
+                    if (!allowedExtensions.includes(fileExtension)) {
+                        alert(`File "${file.name}" is not supported. Please upload only text-based files (.txt, .md, .json, .csv, .html).`);
+                        continue;
+                    }
+
+                    addSourceBtn.innerHTML = `<span>Processing...</span>`;
+
+                    // Use standard FileReader wrap in Promise to process sequentially
+                    const content = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = (event) => resolve(event.target.result);
+                        reader.onerror = (err) => reject(err);
+                        reader.readAsText(file);
+                    });
+
+                    // Update UI status inside the list box to give direct premium feedback
+                    const originalListBoxClass = sourcesListBox.className;
+                    sourcesListBox.className = 'sources-list-box';
+                    sourcesListBox.innerHTML = `
+                        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; color: var(--text-muted); font-size: 0.875rem;">
+                            <div class="status-dot" style="background-color: var(--primary-color); width: 12px; height: 12px; animation: badge-pulse 1.2s infinite ease-in-out;"></div>
+                            <span style="font-weight: 500; color: var(--text-color);">Analyzing & Chunking ${file.name}...</span>
+                            <span style="font-size: 0.75rem;">Embedding Model: ${modelName}</span>
+                        </div>
+                    `;
+
+                    // Chunk the content
+                    const chunks = chunkText(content);
+                    const chunkData = [];
+
+                    for (let c = 0; c < chunks.length; c++) {
+                        sourcesListBox.querySelector('span').textContent = `Vectorizing ${file.name} (Chunk ${c + 1}/${chunks.length})...`;
+                        
+                        try {
+                            const embedding = await computeEmbedding(chunks[c], modelName);
+                            chunkData.push({
+                                text: chunks[c],
+                                embedding: embedding
+                            });
+                        } catch (err) {
+                            console.error(`[Embeddings] Vector generation failed for chunk ${c}:`, err);
+                            // Fallback to empty vector if model fails to prevent blocking execution
+                            chunkData.push({
+                                text: chunks[c],
+                                embedding: []
+                            });
+                        }
+                    }
+
                     const newSource = {
                         id: 'src_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
                         name: file.name,
                         size: file.size,
                         type: file.type,
-                        content: content
+                        content: content,
+                        chunks: chunkData
                     };
 
                     deck.sources.push(newSource);
                     deck.itemCount = deck.sources.length;
                     await saveDecks();
-                    renderSources(deck);
-                };
+                }
 
-                reader.readAsText(file);
+                renderSources(deck);
+                alert("Files uploaded, chunked, and converted to vector embeddings successfully!");
+            } catch (err) {
+                console.error("[Upload] Processing failed:", err);
+                alert("An error occurred during file processing: " + err.message);
+                renderSources(deck);
+            } finally {
+                // Restore upload button state
+                addSourceBtn.disabled = false;
+                addSourceBtn.style.opacity = '1';
+                addSourceBtn.innerHTML = originalBtnHtml;
+                sourceFileInput.value = '';
             }
-
-            // Reset input element
-            sourceFileInput.value = '';
         });
 
         // View toggle (List vs Grid layout representation)

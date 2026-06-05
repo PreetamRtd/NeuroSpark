@@ -1,4 +1,4 @@
-const CACHE_NAME = 'neurospark-cache-v21';
+const CACHE_NAME = 'neurospark-cache-v22';
 const ASSETS = [
   './',
   './index.html',
@@ -40,6 +40,22 @@ self.addEventListener('activate', (event) => {
 
 // Fetch Event: Stale-While-Revalidate strategy
 self.addEventListener('fetch', (event) => {
+  // Intercept Hugging Face requests for offline models
+  if (event.request.method === 'GET' && event.request.url.includes('huggingface.co')) {
+    event.respondWith(
+      caches.open('neurospark-models-cache').then((cache) => {
+        return cache.match(event.request).then((cachedResponse) => {
+          if (cachedResponse) {
+            console.log('[Service Worker] Serving cached model file:', event.request.url);
+            return cachedResponse;
+          }
+          return fetch(event.request);
+        });
+      })
+    );
+    return;
+  }
+
   // Only handle GET requests and local scope
   if (event.request.method !== 'GET' || !event.request.url.startsWith(self.location.origin)) {
     return;
