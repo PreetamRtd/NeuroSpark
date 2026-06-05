@@ -1,4 +1,4 @@
-const CACHE_NAME = 'neurospark-cache-v29';
+const CACHE_NAME = 'neurospark-cache-v30';
 const ASSETS = [
   './',
   './index.html',
@@ -11,6 +11,7 @@ const ASSETS = [
   './tools/htmlSimulator.js',
   './tools/mermaidVisualizer.js',
   './tools/fsrsReview.js',
+  './tools/focusReader.js',
   './assets/icon-192.png',
   './assets/icon-512.png',
   'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js',
