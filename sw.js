@@ -1,4 +1,4 @@
-const CACHE_NAME = 'neurospark-cache-v20';
+const CACHE_NAME = 'neurospark-cache-v21';
 const ASSETS = [
   './',
   './index.html',
@@ -6,8 +6,8 @@ const ASSETS = [
   './manifest.json',
   './storage.js',
   './webgpu.js',
-  './icon-192.png',
-  './icon-512.png'
+  './assets/icon-192.png',
+  './assets/icon-512.png'
 ];
 
 // Install Event: Cache static assets
