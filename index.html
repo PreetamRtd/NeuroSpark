@@ -330,6 +330,13 @@
     <!-- WebGPU Utility -->
     <script src="webgpu.js"></script>
 
+    <!-- Register Tools Container -->
+    <script>
+        window.NeuroSparkTools = [];
+    </script>
+    <!-- Load Isolated Tools -->
+    <script src="tools/ragSearch.js"></script>
+
     <!-- Interactivity & PWA Script -->
     <script>
         // Core navigation elements
@@ -1109,6 +1116,49 @@
             });
         }
 
+        // Render tools inside the right panel box
+        function renderTools(deck) {
+            const toolsGridBox = document.querySelector('.tools-grid-box');
+            if (!toolsGridBox) return;
+
+            if (!window.NeuroSparkTools || window.NeuroSparkTools.length === 0) {
+                toolsGridBox.className = 'tools-grid-box empty-tools';
+                toolsGridBox.innerHTML = `
+                    <div class="panel-empty-state">
+                        <svg class="empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="12" width="7" height="9"></rect><rect x="3" y="16" width="7" height="5"></rect></svg>
+                        <p>No tools active</p>
+                    </div>
+                `;
+                return;
+            }
+
+            toolsGridBox.className = 'tools-grid-box';
+            toolsGridBox.innerHTML = `
+                <div class="tools-grid-container">
+                    <!-- Tool cards will render here -->
+                </div>
+            `;
+
+            const gridContainer = toolsGridBox.querySelector('.tools-grid-container');
+
+            window.NeuroSparkTools.forEach(tool => {
+                const card = document.createElement('div');
+                card.className = 'tool-card';
+                card.innerHTML = `
+                    <div class="tool-card-icon">${tool.icon}</div>
+                    <div class="tool-card-title">${tool.name}</div>
+                    <div class="tool-card-description">${tool.description}</div>
+                `;
+
+                card.addEventListener('click', () => {
+                    // Render the individual tool view inside the toolsGridBox
+                    tool.render(toolsGridBox, deck, () => renderTools(deck));
+                });
+
+                gridContainer.appendChild(card);
+            });
+        }
+
         // Open specific deck in notebook editor view
         function openDeck(deckId) {
             const deck = decks.find(d => d.id === deckId);
@@ -1119,6 +1169,7 @@
             
             deckEditorTitle.value = deck.title;
             renderSources(deck);
+            renderTools(deck);
             showView('deck');
         }
 

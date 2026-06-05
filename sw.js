@@ -1,4 +1,4 @@
-const CACHE_NAME = 'neurospark-cache-v23';
+const CACHE_NAME = 'neurospark-cache-v24';
 const ASSETS = [
   './',
   './index.html',
@@ -6,6 +6,7 @@ const ASSETS = [
   './manifest.json',
   './storage.js',
   './webgpu.js',
+  './tools/ragSearch.js',
   './assets/icon-192.png',
   './assets/icon-512.png',
   'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js',
