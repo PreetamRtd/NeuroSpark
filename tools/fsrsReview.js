@@ -2,9 +2,8 @@
  * NeuroSpark Tool: FSRS Smart Review
  * Each vector chunk = an Anki-style spaced-repetition card.
  * Uses FSRS v4 algorithm to schedule reviews.
- * AI generates questions from due cards in a single initial call.
- * Auto-grades MCQ/TF/Blank locally; self-rates short answers.
- * Updates FSRS variables in IndexedDB.
+ * AI selects cards and generates quiz questions based on a custom study prompt.
+ * Evaluates responses with LLM at the end and updates FSRS variables.
  *
  * Isolated IIFE — zero external dependencies.
  */
@@ -167,7 +166,7 @@
     }
 
     /* ══════════════════════════════════════════════════════
-       DUE CARD DISCOVERY
+       DUE CARD DISCOVERY & PRE-FILTERING
      ══════════════════════════════════════════════════════ */
     function ensureFSRS(chunk) {
         if (!chunk.fsrs) chunk.fsrs = fsrsInit();
@@ -195,12 +194,62 @@
                 }
             });
         });
-        // Shuffle + cap
-        for (let i = due.length - 1; i > 0; i--) {
+        return due;
+    }
+
+    function filterCandidates(deck, userQuery) {
+        const all = [];
+        (deck.sources || []).forEach((src, si) => {
+            (src.chunks || []).forEach((chunk, ci) => {
+                ensureFSRS(chunk);
+                all.push({
+                    srcIdx: si, chunkIdx: ci,
+                    text: chunk.text,
+                    fsrs: { ...chunk.fsrs },
+                    sourceName: src.name
+                });
+            });
+        });
+
+        if (all.length === 0) return [];
+
+        const queryWords = String(userQuery || '')
+            .toLowerCase()
+            .replace(/[^\w\s]/g, '')
+            .split(/\s+/)
+            .filter(w => w.length > 2);
+
+        const scored = all.map(card => {
+            let score = 0;
+            // Priorities: review/relearn states get base priority
+            if (card.fsrs.state !== 0) {
+                score += 50;
+            }
+            if (new Date(card.fsrs.due) <= new Date()) {
+                score += 30;
+            }
+            // Keyword matching
+            if (queryWords.length > 0) {
+                const cardTextLower = card.text.toLowerCase();
+                queryWords.forEach(word => {
+                    if (cardTextLower.includes(word)) {
+                        score += 25;
+                    }
+                });
+            }
+            return { card, score };
+        });
+
+        scored.sort((a, b) => b.score - a.score);
+
+        // Shuffle top subset to vary review patterns
+        const candidates = scored.map(s => s.card).slice(0, 30);
+        for (let i = candidates.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
-            [due[i], due[j]] = [due[j], due[i]];
+            [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
         }
-        return due.slice(0, MAX_SESSION);
+
+        return candidates.slice(0, MAX_SESSION);
     }
 
     function dueLabel(isoDate) {
@@ -226,6 +275,16 @@
 /* states */
 .fsr-phase{display:flex;flex-direction:column;gap:14px;height:100%;}
 .fsr-phase.hidden{display:none;}
+/* Setup card styles */
+.fsr-setup-card{background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:14px;box-shadow:var(--shadow-sm);margin-top:10px;}
+.fsr-setup-title{font-size:1rem;font-weight:700;color:var(--text-color);display:flex;align-items:center;gap:6px;}
+.fsr-setup-desc{font-size:.75rem;color:var(--text-muted);line-height:1.5;}
+.fsr-setup-input{width:100%;height:90px;padding:12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-color);font-size:.875rem;font-family:var(--font-sans);resize:none;outline:none;line-height:1.5;transition:all .15s ease-in-out;}
+.fsr-setup-input:focus{border-color:var(--primary-color);background:var(--bg-input-focus);box-shadow:0 0 0 2px rgba(99,102,241,0.15);}
+.fsr-setup-stats{font-size:.75rem;color:var(--text-muted);display:flex;gap:16px;border-top:1px solid var(--border-color);padding-top:12px;margin-top:4px;}
+.fsr-setup-btn{padding:12px 24px;border-radius:8px;border:none;background:var(--primary-color);color:#fff;font-size:.875rem;font-weight:600;cursor:pointer;transition:all .15s ease;text-align:center;width:100%;}
+.fsr-setup-btn:hover{background:var(--primary-hover);transform:translateY(-1px);}
+.fsr-setup-btn:active{transform:translateY(0);}
 /* stats row */
 .fsr-stats{display:flex;gap:10px;flex-shrink:0;}
 .fsr-stat{flex:1;background:var(--bg-input);border:1px solid var(--border-color);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:3px;}
@@ -258,18 +317,7 @@ body.dark-theme .fsr-option-card.correct{color:#a7f3d0!important;background:rgba
 .fsr-option-card.incorrect{border-color:#ef4444!important;background:rgba(239,68,68,0.08)!important;color:#991b1b!important;}
 body.dark-theme .fsr-option-card.incorrect{color:#fca5a5!important;background:rgba(239,68,68,0.15)!important;}
 .fsr-option-card.disabled{cursor:not-allowed;opacity:.7;}
-/* True / False */
-.fsr-tf-row{display:flex;gap:10px;margin-top:8px;flex-shrink:0;}
-.fsr-tf-btn{flex:1;padding:14px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-color);font-size:.875rem;font-weight:600;cursor:pointer;transition:all .12s ease;outline:none;}
-.fsr-tf-btn:hover:not(.disabled){background:var(--bg-hover);}
-.fsr-tf-btn.tf-true:hover:not(.disabled){border-color:#10b981;color:#10b981;}
-.fsr-tf-btn.tf-false:hover:not(.disabled){border-color:#ef4444;color:#ef4444;}
-.fsr-tf-btn.correct{border-color:#10b981!important;background:rgba(16,185,129,0.08)!important;color:#065f46!important;}
-body.dark-theme .fsr-tf-btn.correct{color:#a7f3d0!important;background:rgba(16,185,129,0.15)!important;}
-.fsr-tf-btn.incorrect{border-color:#ef4444!important;background:rgba(239,68,68,0.08)!important;color:#991b1b!important;}
-body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(239,68,68,0.15)!important;}
-.fsr-tf-btn.disabled{cursor:not-allowed;opacity:.7;}
-/* Fill Blank */
+/* Cloze & Fill Blank */
 .fsr-blank-row{display:flex;gap:8px;margin-top:8px;flex-shrink:0;}
 .fsr-blank-input{flex:1;padding:10px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-color);font-size:.8125rem;outline:none;transition:border-color .15s;}
 .fsr-blank-input:focus{border-color:var(--primary-color);}
@@ -279,7 +327,7 @@ body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(23
 .fsr-blank-feedback{display:flex;align-items:center;gap:6px;font-size:.8125rem;font-weight:600;margin-top:6px;}
 .fsr-blank-feedback.correct{color:#10b981;}
 .fsr-blank-feedback.incorrect{color:#ef4444;}
-/* Short Answer / Textarea */
+/* Short Answer / Textarea / Front-back input */
 .fsr-answer-wrap{display:flex;flex-direction:column;gap:8px;flex-shrink:0;margin-top:8px;}
 .fsr-answer{width:100%;min-height:80px;padding:10px 12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-color);font-size:.8125rem;font-family:var(--font-sans);resize:none;outline:none;line-height:1.5;transition:border-color .15s;}
 .fsr-answer:focus{border-color:var(--primary-color);}
@@ -294,14 +342,6 @@ body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(23
 /* general explanation box */
 .fsr-explanation-box{margin-top:10px;padding:12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:8px;font-size:.75rem;line-height:1.5;animation:fsrFadeIn .25s ease;}
 .fsr-explanation-title{font-weight:700;color:var(--text-label);margin-bottom:4px;display:flex;align-items:center;gap:4px;}
-/* self rating row */
-.fsr-self-rate-row{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;}
-.fsr-self-rate-btn{padding:8px 4px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-color);font-size:.75rem;font-weight:600;cursor:pointer;transition:all .12s ease;display:flex;flex-direction:column;align-items:center;gap:2px;outline:none;}
-.fsr-self-rate-btn span{font-size:.625rem;font-weight:400;color:var(--text-muted);}
-.fsr-self-rate-btn.again:hover{border-color:#ef4444;background:rgba(239,68,68,0.05);color:#ef4444;}
-.fsr-self-rate-btn.hard:hover{border-color:#f59e0b;background:rgba(245,158,11,0.05);color:#f59e0b;}
-.fsr-self-rate-btn.good:hover{border-color:#10b981;background:rgba(16,185,129,0.05);color:#10b981;}
-.fsr-self-rate-btn.easy:hover{border-color:#6366f1;background:rgba(99,102,241,0.05);color:#6366f1;}
 
 .fsr-next-btn{padding:9px 22px;border-radius:8px;border:none;background:var(--primary-color);color:#fff;font-size:.875rem;font-weight:600;cursor:pointer;transition:opacity .15s;align-self:flex-end;margin-top:10px;}
 .fsr-next-btn:hover{opacity:.95;}
@@ -348,7 +388,7 @@ body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(23
     const toolDefinition = {
         id: 'fsrs-review',
         name: 'Smart Review',
-        description: 'FSRS spaced repetition — Auto-generated concept-based quizzes with MCQ, T/F, blanks, & self-rated short answers.',
+        description: 'FSRS spaced repetition — AI-customized reviews & structured quizzes with automated final LLM grading.',
         icon: TOOL_ICON,
 
         render(container, deck, onBack) {
@@ -363,20 +403,36 @@ body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(23
   </div>
   <div class="fsr-progress-bar-wrap"><div class="fsr-progress-bar" id="fsrProgress" style="width:0%"></div></div>
 
+  <!-- SETUP phase -->
+  <div class="fsr-phase" id="fsrPhaseSetup">
+    <div class="fsr-setup-card">
+      <div class="fsr-setup-title">🎯 Custom Study Goal</div>
+      <div class="fsr-setup-desc">Tell the AI what you want to study today (e.g. topic request, target card counts) or leave it blank to study all due/relearn cards automatically.</div>
+      <textarea class="fsr-setup-input" id="fsrSetupInput" placeholder="e.g. I want to study Machine Learning today. Give me at least 5 ML cards + all review or relearn cards."></textarea>
+      <div class="fsr-setup-stats" id="fsrSetupStats">Scanning deck...</div>
+      <button class="fsr-setup-btn" id="fsrStartBtn">Start AI Smart Review</button>
+    </div>
+  </div>
+
   <!-- DISCOVERY phase -->
-  <div class="fsr-phase" id="fsrPhaseDiscover">
-    <div class="fsr-spinner"><div class="fsr-dot"></div><span id="fsrDiscoverMsg">Scanning cards…</span></div>
+  <div class="fsr-phase hidden" id="fsrPhaseDiscover">
+    <div class="fsr-spinner"><div class="fsr-dot"></div><span id="fsrDiscoverMsg">Filtering your deck…</span></div>
   </div>
 
   <!-- GENERATING phase -->
   <div class="fsr-phase hidden" id="fsrPhaseGenerating">
-    <div class="fsr-spinner"><div class="fsr-dot"></div><span id="fsrGeneratingMsg">AI is crafting questions…</span></div>
+    <div class="fsr-spinner"><div class="fsr-dot"></div><span id="fsrGeneratingMsg">AI is selecting cards…</span></div>
   </div>
 
   <!-- REVIEW phase -->
   <div class="fsr-phase hidden" id="fsrPhaseReview">
     <div class="fsr-stats" id="fsrStats"></div>
     <div class="fsr-body" id="fsrReviewBody"></div>
+  </div>
+
+  <!-- GRADING phase -->
+  <div class="fsr-phase hidden" id="fsrPhaseGrading">
+    <div class="fsr-spinner"><div class="fsr-dot"></div><span id="fsrGradingMsg">LLM is evaluating your answers…</span></div>
   </div>
 
   <!-- RESULTS phase -->
@@ -388,16 +444,18 @@ body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(23
   <div class="fsr-phase hidden" id="fsrPhaseEmpty">
     <div class="fsr-empty">
       <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
-      <span id="fsrEmptyMsg">No cards due for review today.</span>
-      <span style="font-size:.6875rem;">Come back tomorrow or upload more documents.</span>
+      <span id="fsrEmptyMsg">No cards matching your criteria.</span>
+      <span style="font-size:.6875rem;">Modify your prompt or upload more source documents.</span>
+      <button class="fsr-restart-btn" id="fsrEmptyBackBtn" style="align-self:center;">🔄 Try Again</button>
     </div>
   </div>
 </div>`;
 
             container.querySelector('#fsrBack').addEventListener('click', onBack);
+            container.querySelector('#fsrEmptyBackBtn').addEventListener('click', () => showSetupScreen());
 
             /* ── helpers to show/hide phases ── */
-            const phases = ['Discover','Generating','Review','Results','Empty'];
+            const phases = ['Setup','Discover','Generating','Review','Grading','Results','Empty'];
             function showPhase(name) {
                 phases.forEach(p => container.querySelector(`#fsrPhase${p}`).classList.toggle('hidden', p !== name));
             }
@@ -405,7 +463,7 @@ body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(23
             /* ── session state ── */
             let dueCards   = [];
             let questions  = [];
-            let answers    = [];   // { text, rating, firstTryCorrect, images, audioText }
+            let answers    = [];   // { text, firstTryCorrect, images, audioText }
             let currentIdx = 0;
             let mediaRecorder = null;
             let audioChunks   = [];
@@ -415,10 +473,33 @@ body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(23
                 container.querySelector('#fsrProgress').style.width = pct + '%';
             }
 
-            /* ══ PHASE 1: DISCOVER ══ */
-            async function startDiscover() {
+            /* ══ PHASE 0: SETUP SCREEN ══ */
+            function showSetupScreen() {
+                showPhase('Setup');
+                setProgress(0, 1);
+                
+                const total = (deck.sources || []).reduce((a, s) => a + (s.chunks || []).length, 0);
+                const due = collectDueCards(deck).length;
+                const reviewRelearn = (deck.sources || []).reduce((acc, src) => {
+                    return acc + (src.chunks || []).filter(c => c.fsrs && c.fsrs.state !== 0).length;
+                }, 0);
+
+                container.querySelector('#fsrSetupStats').innerHTML = `
+                    <span>📚 Total Chunks: ${total}</span>
+                    <span>⏰ Due Now: ${due}</span>
+                    <span>🔄 In Review: ${reviewRelearn}</span>
+                `;
+            }
+
+            container.querySelector('#fsrStartBtn').addEventListener('click', () => {
+                const userQuery = container.querySelector('#fsrSetupInput').value.trim();
+                startDiscover(userQuery);
+            });
+
+            /* ══ PHASE 1: DISCOVER (PRE-FILTERING) ══ */
+            async function startDiscover(userQuery) {
                 showPhase('Discover');
-                container.querySelector('#fsrDiscoverMsg').textContent = 'Scanning cards…';
+                container.querySelector('#fsrDiscoverMsg').textContent = 'Filtering candidates based on your request...';
 
                 if (!deck.sources || deck.sources.length === 0) {
                     showPhase('Empty');
@@ -426,87 +507,93 @@ body.dark-theme .fsr-tf-btn.incorrect{color:#fca5a5!important;background:rgba(23
                     return;
                 }
 
-                dueCards = collectDueCards(deck);
+                const candidates = filterCandidates(deck, userQuery);
 
-                if (dueCards.length === 0) {
-                    const total = (deck.sources || []).reduce((a, s) => a + (s.chunks || []).length, 0);
-                    if (total === 0) {
-                        showPhase('Empty');
-                        container.querySelector('#fsrEmptyMsg').textContent = 'No vector chunks found. Upload and embed documents first.';
-                    } else {
-                        showPhase('Empty');
-                    }
+                if (candidates.length === 0) {
+                    showPhase('Empty');
                     return;
                 }
 
-                container.querySelector('#fsrDiscoverMsg').textContent = `Found ${dueCards.length} due card${dueCards.length > 1 ? 's' : ''}. Generating questions…`;
-                await generateQuestions();
+                await generateQuestions(candidates, userQuery || 'Review all due cards.');
             }
 
-            /* ══ PHASE 2: GENERATE QUESTIONS (SINGLE LLM CHAT) ══ */
-            async function generateQuestions() {
+            /* ══ PHASE 2: GENERATE QUESTIONS (SINGLE LLM SELECTION + DRAFT) ══ */
+            async function generateQuestions(candidates, userQuery) {
                 showPhase('Generating');
-                const total = dueCards.length;
-                container.querySelector('#fsrGeneratingMsg').textContent = `AI is designing your customized quiz (${total} cards)…`;
+                container.querySelector('#fsrGeneratingMsg').textContent = `AI is selecting cards and designing questions...`;
 
-                const chunks = dueCards.map((c, i) =>
-                    `Card ${i + 1} [Source: ${c.sourceName}]:\n"""\n${c.text.slice(0, 600)}\n"""`
+                const chunkList = candidates.map((c, i) =>
+                    `Candidate Card ${i} [Source: ${c.sourceName}, FSRS State: ${c.fsrs.state}, Due: ${dueLabel(c.fsrs.due)}]:\n"""\n${c.text.slice(0, 500)}\n"""`
                 ).join('\n\n---\n\n');
 
-                const prompt = `You are an expert tutor designing a spaced-repetition quiz for a student.
-For each of the ${total} cards below, generate exactly ONE question.
+                const prompt = `You are an expert study assistant designing a customized spaced-repetition quiz.
+The student has submitted this study request:
+"${userQuery}"
 
-IMPORTANT: The question must test deep conceptual understanding or application of examples from the card.
-DO NOT ask superficial questions like "What does this text discuss?" or "Summarize this passage".
-DO NOT show the correct answer or spoil the question in the question text.
+We have filtered a candidate pool of ${candidates.length} cards from their documents:
+${chunkList}
 
-For each card, choose the most appropriate question type based on the content:
-1. "mcq" (Multiple Choice Question): Use this for concepts with clear alternatives. Provide exactly 4 options.
-2. "true_false": Use this for clear statements of fact, definitions, or principles.
-3. "fill_blank": Use this for key terms, definitions or formulas. Replace the key word/phrase in the question with "_______".
-4. "short_answer": Use this for open-ended conceptual explanations or code/math problems.
+Your task is to select a subset of these cards (up to 15 cards) that best satisfy the student's request, prioritizing:
+1. All cards in a review or relearn state (FSRS State !== 0).
+2. Additional cards matching the requested topic/instructions.
 
-Cards:
-${chunks}
+For each selected card, generate exactly ONE question. Use a variety of question types appropriate for the content:
+- "mcq" (Multiple Choice Question): Provide 4 options, correctAnswer must be one of the options.
+- "text_input": Short Answer. Ask for a brief explanation or definition.
+- "front_back": Flashcard style. Ask a front question (e.g. "What is the capital of France?" or "How does X affect Y?").
+- "cloze": Cloze deletion. A statement with a key term replaced by "_______".
 
-Return ONLY a valid JSON object matching this structure (no markdown wrapper, no other text):
+Ensure all questions test conceptual understanding or application of examples rather than simple text retrieval.
+
+Return ONLY a valid JSON object matching this schema (no markdown, no other text):
 {
-  "questions": [
+  "selected": [
     {
-      "idx": 0,
-      "type": "mcq",
-      "question": "Which of the following best describes...",
-      "options": ["Option A", "Option B", "Option C", "Option D"],
-      "correctAnswer": "Option B",
-      "explanation": "Explanation of why Option B is correct based on...",
-      "concept": "Concept Name"
-    },
-    ...
+      "candidateIdx": 0, // The candidate card index (0 to ${candidates.length - 1})
+      "type": "mcq | text_input | front_back | cloze",
+      "question": "The question text...",
+      "options": ["Option A", "Option B", "Option C", "Option D"], // Only for mcq, empty array otherwise
+      "correctAnswer": "The reference correct answer...",
+      "explanation": "Detailed explanation of the concept...",
+      "concept": "Concept Name (e.g., Neural Networks)"
+    }
   ]
 }`;
 
                 try {
                     const raw  = await callAI(prompt);
                     const data = parseJSON(raw);
-                    questions  = data.questions || [];
+                    const selectedList = data.selected || [];
 
-                    if (questions.length !== total) {
-                        // Align array length if LLM missed some
-                        throw new Error('Incomplete question count returned');
+                    dueCards = [];
+                    questions = [];
+
+                    selectedList.forEach(item => {
+                        const idx = parseInt(item.candidateIdx);
+                        if (candidates[idx]) {
+                            dueCards.push(candidates[idx]);
+                            questions.push(item);
+                        }
+                    });
+
+                    if (dueCards.length === 0) {
+                        throw new Error('AI did not select any valid cards');
                     }
                 } catch (err) {
-                    console.warn('[FSRS] Question generation fallback:', err);
+                    console.warn('[FSRS] Question selection fallback:', err);
+                    // Fallback to due cards directly
+                    dueCards = candidates.slice(0, 10);
                     questions = dueCards.map((c, i) => ({
-                        idx: i,
-                        type: 'short_answer',
-                        question: `Explain and verify your understanding of the concept: "${c.text.slice(0, 100)}..."`,
+                        candidateIdx: i,
+                        type: 'text_input',
+                        question: `Explain and verify your understanding of: "${c.text.slice(0, 100)}..."`,
                         correctAnswer: c.text,
                         explanation: 'Review the source material to assess your knowledge.',
                         concept: 'Recall Practice'
                     }));
                 }
 
-                answers = dueCards.map(() => ({ text: '', rating: null, firstTryCorrect: null, images: [], audioText: '' }));
+                answers = dueCards.map(() => ({ text: '', firstTryCorrect: null, images: [], audioText: '' }));
                 currentIdx = 0;
                 startReview();
             }
@@ -524,7 +611,7 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                 const revCnt  = dueCards.filter(c => c.fsrs.state === 2).length;
                 const relCnt  = dueCards.filter(c => c.fsrs.state === 3).length;
                 container.querySelector('#fsrStats').innerHTML = `
-                    <div class="fsr-stat"><div class="fsr-stat-val">${total}</div><div class="fsr-stat-label">Due today</div></div>
+                    <div class="fsr-stat"><div class="fsr-stat-val">${total}</div><div class="fsr-stat-label">In Session</div></div>
                     <div class="fsr-stat"><div class="fsr-stat-val">${newCnt}</div><div class="fsr-stat-label">New</div></div>
                     <div class="fsr-stat"><div class="fsr-stat-val">${revCnt}</div><div class="fsr-stat-label">Review</div></div>
                     <div class="fsr-stat"><div class="fsr-stat-val">${relCnt}</div><div class="fsr-stat-label">Relearn</div></div>`;
@@ -541,7 +628,6 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
 
                 const ans = answers[idx];
 
-                // Base card header & collapsible context hint (zero spoilers by default)
                 let html = `
                 <span class="fsr-card-counter">Card ${idx + 1} of ${dueCards.length}</span>
                 <div class="fsr-card">
@@ -573,7 +659,6 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                     hintToggle.textContent = isVisible ? '💡 Hide Source Context' : '💡 View Source Context';
                 });
 
-                // Render specific input based on question type
                 renderInteraction(idx, q, ans);
             }
 
@@ -583,7 +668,7 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
 
                 if (q.type === 'mcq') {
                     let optionsHTML = (q.options || []).map((opt, oIdx) => {
-                        const letter = String.fromCharCode(65 + oIdx); // A, B, C, D
+                        const letter = String.fromCharCode(65 + oIdx);
                         return `
                         <button class="fsr-option-card" data-index="${oIdx}">
                             <span class="fsr-option-badge">${letter}</span>
@@ -600,7 +685,7 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                     const optBtns = area.querySelectorAll('.fsr-option-card');
                     optBtns.forEach(btn => {
                         btn.addEventListener('click', () => {
-                            if (ans.firstTryCorrect !== null) return; // already answered
+                            if (ans.firstTryCorrect !== null) return;
                             const selectedIdx = parseInt(btn.getAttribute('data-index'));
                             const selectedVal = q.options[selectedIdx];
                             const correctVal  = q.correctAnswer;
@@ -608,9 +693,7 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                             const isCorrect = (selectedVal === correctVal || selectedIdx === q.options.indexOf(correctVal));
                             ans.firstTryCorrect = isCorrect;
                             ans.text = selectedVal;
-                            ans.rating = isCorrect ? 3 : 1; // Good if correct, Again if wrong
 
-                            // Visual Feedback
                             optBtns.forEach((b, bIdx) => {
                                 b.classList.add('disabled');
                                 const val = q.options[bIdx];
@@ -621,55 +704,9 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                                 }
                             });
 
-                            // Display Explanation
                             explArea.innerHTML = `
                             <div class="fsr-explanation-box">
-                                <div class="fsr-explanation-title">📝 Explanation</div>
-                                <div>${escHTML(q.explanation || 'Study the context source card details above.')}</div>
-                            </div>`;
-
-                            // Show Next button
-                            const nextBtn = area.querySelector('#fsrNextBtn');
-                            nextBtn.classList.remove('hidden');
-                            nextBtn.focus();
-                        });
-                    });
-
-                    area.querySelector('#fsrNextBtn').addEventListener('click', advanceCard);
-
-                } else if (q.type === 'true_false') {
-                    area.innerHTML = `
-                    <div class="fsr-tf-row">
-                        <button class="fsr-tf-btn tf-true" data-value="true">True</button>
-                        <button class="fsr-tf-btn tf-false" data-value="false">False</button>
-                    </div>
-                    <button class="fsr-next-btn hidden" id="fsrNextBtn">Next Question →</button>`;
-
-                    const tfBtns = area.querySelectorAll('.fsr-tf-btn');
-                    tfBtns.forEach(btn => {
-                        btn.addEventListener('click', () => {
-                            if (ans.firstTryCorrect !== null) return;
-                            const val = btn.getAttribute('data-value');
-                            const correctVal = String(q.correctAnswer).toLowerCase().trim();
-
-                            const isCorrect = (val === correctVal);
-                            ans.firstTryCorrect = isCorrect;
-                            ans.text = val;
-                            ans.rating = isCorrect ? 3 : 1;
-
-                            tfBtns.forEach(b => {
-                                b.classList.add('disabled');
-                                const bVal = b.getAttribute('data-value');
-                                if (bVal === correctVal) {
-                                    b.classList.add('correct');
-                                } else if (bVal === val) {
-                                    b.classList.add('incorrect');
-                                }
-                            });
-
-                            explArea.innerHTML = `
-                            <div class="fsr-explanation-box">
-                                <div class="fsr-explanation-title">📝 Explanation</div>
+                                <div class="fsr-explanation-title">📝 Reference Details</div>
                                 <div>${escHTML(q.explanation || 'Study the details in the source card.')}</div>
                             </div>`;
 
@@ -681,7 +718,7 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
 
                     area.querySelector('#fsrNextBtn').addEventListener('click', advanceCard);
 
-                } else if (q.type === 'fill_blank') {
+                } else if (q.type === 'cloze') {
                     area.innerHTML = `
                     <div class="fsr-blank-row">
                         <input type="text" class="fsr-blank-input" id="fsrBlankInput" placeholder="Type your answer here..." autocomplete="off">
@@ -710,7 +747,6 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
 
                         ans.firstTryCorrect = isCorrect;
                         ans.text = userVal;
-                        ans.rating = isCorrect ? 3 : 1;
 
                         input.disabled = true;
                         submit.disabled = true;
@@ -720,12 +756,12 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                             fb.innerHTML = '✨ Correct!';
                         } else {
                             fb.className = 'fsr-blank-feedback incorrect';
-                            fb.innerHTML = `❌ Incorrect. Correct answer: <strong>${escHTML(correctVal)}</strong>`;
+                            fb.innerHTML = `❌ Incorrect. Reference: <strong>${escHTML(correctVal)}</strong>`;
                         }
 
                         explArea.innerHTML = `
                         <div class="fsr-explanation-box">
-                            <div class="fsr-explanation-title">📝 Explanation</div>
+                            <div class="fsr-explanation-title">📝 Reference Details</div>
                             <div>${escHTML(q.explanation || 'Study the details in the source card.')}</div>
                         </div>`;
 
@@ -743,10 +779,13 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                     area.querySelector('#fsrNextBtn').addEventListener('click', advanceCard);
 
                 } else {
-                    // Short Answer (Classic free-text, voice, images, with self-rating buttons)
+                    // text_input or front_back — both take text/voice/media responses
+                    const buttonLabel = q.type === 'front_back' ? 'Reveal Back' : 'Submit Answer';
+                    const answerPlaceholder = q.type === 'front_back' ? 'Formulate your response (optional)...' : 'Type your detailed answer...';
+
                     area.innerHTML = `
                     <div class="fsr-answer-wrap">
-                        <textarea class="fsr-answer" id="fsrAnswerText" placeholder="Type your explanation or answer..." spellcheck="true">${escHTML(ans.text)}</textarea>
+                        <textarea class="fsr-answer" id="fsrAnswerText" placeholder="${answerPlaceholder}" spellcheck="true">${escHTML(ans.text)}</textarea>
 
                         <div class="fsr-media-row">
                             <label class="fsr-media-btn" for="fsrImgInput" title="Attach image">
@@ -760,25 +799,17 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                             <div class="fsr-media-preview" id="fsrMediaPreview"></div>
                         </div>
 
-                        <button class="fsr-next-btn" style="align-self:flex-start; margin-top:2px;" id="fsrShowBtn">Reveal Answer</button>
-                    </div>
-                    <div id="fsrSelfRateArea" class="hidden">
-                        <div class="fsr-self-rate-row">
-                            <button class="fsr-self-rate-btn again" data-rate="1">Again<span>&lt;10m</span></button>
-                            <button class="fsr-self-rate-btn hard" data-rate="2">Hard<span>1d</span></button>
-                            <button class="fsr-self-rate-btn good" data-rate="3">Good<span>4d</span></button>
-                            <button class="fsr-self-rate-btn easy" data-rate="4">Easy<span>7d</span></button>
-                        </div>
+                        <button class="fsr-next-btn" style="align-self:flex-start; margin-top:2px;" id="fsrSubmitBtn">${buttonLabel}</button>
+                        <button class="fsr-next-btn hidden" id="fsrNextBtn">Next Question →</button>
                     </div>`;
 
-                    const textarea = area.querySelector('#fsrAnswerText');
-                    const showBtn  = area.querySelector('#fsrShowBtn');
-                    const selfRate = area.querySelector('#fsrSelfRateArea');
+                    const textarea  = area.querySelector('#fsrAnswerText');
+                    const submitBtn = area.querySelector('#fsrSubmitBtn');
+                    const nextBtn   = area.querySelector('#fsrNextBtn');
 
                     textarea.addEventListener('input', () => { ans.text = textarea.value; });
                     textarea.focus();
 
-                    // Media previews & actions
                     renderMediaPreview(idx);
                     const imgInput = area.querySelector('#fsrImgInput');
                     imgInput.addEventListener('change', async () => {
@@ -790,30 +821,24 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                     });
                     area.querySelector('#fsrAudioBtn').addEventListener('click', (e) => toggleRecord(idx, e.currentTarget));
 
-                    showBtn.addEventListener('click', () => {
+                    submitBtn.addEventListener('click', () => {
                         ans.text = textarea.value;
                         textarea.disabled = true;
-                        showBtn.classList.add('hidden');
-                        selfRate.classList.remove('hidden');
+                        submitBtn.classList.add('hidden');
+                        nextBtn.classList.remove('hidden');
+                        nextBtn.focus();
 
+                        const labelText = q.type === 'front_back' ? '🔑 Flashcard Back' : '🔑 Correct Answer';
                         explArea.innerHTML = `
                         <div class="fsr-explanation-box">
-                            <div class="fsr-explanation-title">🔑 Core Answer</div>
-                            <div style="font-weight: 500; margin-bottom: 8px;">${escHTML(q.correctAnswer || '')}</div>
+                            <div class="fsr-explanation-title">${labelText}</div>
+                            <div style="font-weight: 500; margin-bottom: 8px;">${escHTML(q.correctAnswer)}</div>
                             <div class="fsr-explanation-title">📝 Explanation</div>
-                            <div>${escHTML(q.explanation || 'Compare your answer to the reference solution above.')}</div>
+                            <div>${escHTML(q.explanation || 'Review the reference solution details.')}</div>
                         </div>`;
                     });
 
-                    // Self rate click
-                    const rateBtns = selfRate.querySelectorAll('.fsr-self-rate-btn');
-                    rateBtns.forEach(btn => {
-                        btn.addEventListener('click', () => {
-                            const rate = parseInt(btn.getAttribute('data-rate'));
-                            ans.rating = rate;
-                            advanceCard();
-                        });
-                    });
+                    nextBtn.addEventListener('click', advanceCard);
                 }
             }
 
@@ -904,21 +929,74 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                 }
             }
 
-            /* ══ PHASE 4: APPLY + SAVE + LOCAL RESULTS ══ */
+            /* ══ PHASE 4: FINAL EVALUATION & PERSIST ══ */
             async function applyResultsAndFinish() {
                 setProgress(dueCards.length, dueCards.length);
-                showPhase('Discover');
-                container.querySelector('#fsrDiscoverMsg').textContent = 'Applying updates and scoring your session...';
+                showPhase('Grading');
+                container.querySelector('#fsrGradingMsg').textContent = 'LLM is grading your answers and saving progress...';
 
-                // Update FSRS parameters in deck object
-                dueCards.forEach((card, i) => {
-                    const rating = Math.min(4, Math.max(1, answers[i].rating || 2));
-                    const newFSRS = fsrsSchedule(deck.sources[card.srcIdx].chunks[card.chunkIdx].fsrs || fsrsInit(), rating);
-                    deck.sources[card.srcIdx].chunks[card.chunkIdx].fsrs = newFSRS;
-                });
+                // Collect attached images
+                const allImages = [];
+                answers.forEach(a => { if (a.images.length) allImages.push(...a.images); });
+                const gradingImages = allImages.slice(0, 4);
 
-                // Persist to IndexedDB
+                const sessionSummary = dueCards.map((card, i) => {
+                    const q = questions[i];
+                    const a = answers[i];
+                    const hasAudio = a.audioText ? `\n[Spoken answer transcription]: ${a.audioText}` : '';
+                    const hasImg = a.images.length ? `\n[${a.images.length} image(s) attached]` : '';
+                    return `Card ${i + 1} [Concept: ${q.concept}]:
+Question Type: ${q.type}
+Question: ${q.question}
+Reference Answer: ${q.correctAnswer}
+Student Answer: "${a.text || '(blank)'}${hasAudio}${hasImg}"`;
+                }).join('\n\n---\n\n');
+
+                const prompt = `You are an expert AI tutor grading a student's spaced-repetition quiz.
+Grade each card response on the standard FSRS rating scale (1 to 4):
+1 = Again (incorrect, blank, or completely misunderstood)
+2 = Hard (major gaps, partially correct)
+3 = Good (mostly correct, minor slips)
+4 = Easy (perfect recall, showing deep mastery)
+
+Student Responses:
+${sessionSummary}
+
+Rules:
+- MCQ or Cloze selections: If student got it right (verified by their answer matching correct answer), give a 3 or 4. If wrong or blank, give a 1.
+- Open-ended answers (text_input/front_back): Compare student explanation to the reference correct answer. Give partial credit (rating 2) if on the right track, 3 or 4 for accurate recalls.
+
+Return ONLY a valid JSON object (no markdown prefix, no surrounding text):
+{
+  "grades": [
+    {
+      "idx": 0,
+      "rating": 3,
+      "comment": "Correct. Good explanation."
+    }
+  ],
+  "score": 85,
+  "weaknesses": ["Neuroscience definitions need review"],
+  "feedback": "Overall summary review feedback here in 2-3 sentences.",
+  "strengths": ["Excellent conceptual understanding of Machine Learning principles"]
+}`;
+
                 try {
+                    const raw = await callAI(prompt, gradingImages);
+                    const result = parseJSON(raw);
+                    const grades = result.grades || [];
+
+                    const ratingMap = {};
+                    grades.forEach(g => { ratingMap[g.idx] = g.rating; });
+
+                    // Update FSRS parameters in deck object
+                    dueCards.forEach((card, i) => {
+                        const rating = Math.min(4, Math.max(1, ratingMap[i] || 2));
+                        const newFSRS = fsrsSchedule(deck.sources[card.srcIdx].chunks[card.chunkIdx].fsrs || fsrsInit(), rating);
+                        deck.sources[card.srcIdx].chunks[card.chunkIdx].fsrs = newFSRS;
+                    });
+
+                    // Persist to DB
                     if (typeof window.saveDecks === 'function') {
                         if (window.decks) {
                             const di = window.decks.findIndex(d => d.id === deck.id);
@@ -931,27 +1009,14 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                         if (di !== -1) allDecks[di] = deck;
                         await window.dbStore.set('decks', allDecks);
                     }
-                } catch (e) {
-                    console.error('[FSRS] Save failed:', e);
+
+                    showResults(result);
+                } catch (err) {
+                    console.error('[FSRS] AI Evaluation failed:', err);
+                    showPhase('Results');
+                    container.querySelector('#fsrResultsBody').innerHTML =
+                        `<div class="fsr-error">⚠️ Grading failed: ${err.message}<br><br>Your answers were recorded but AI grading could not complete.</div>`;
                 }
-
-                // Analyze strengths & weaknesses by concept
-                const conceptResults = {};
-                questions.forEach((q, i) => {
-                    const isCorrect = q.type === 'short_answer' ? (answers[i].rating >= 3) : answers[i].firstTryCorrect;
-                    const concept = q.concept || 'General Review';
-                    if (!conceptResults[concept]) conceptResults[concept] = [];
-                    conceptResults[concept].push(isCorrect);
-                });
-                
-                const strengths = Object.keys(conceptResults).filter(c => conceptResults[c].every(x => x));
-                const weaknesses = Object.keys(conceptResults).filter(c => conceptResults[c].some(x => !x));
-
-                // Calculate total score
-                const correctCount = answers.filter((a, i) => questions[i].type === 'short_answer' ? (a.rating >= 3) : a.firstTryCorrect).length;
-                const score = Math.round((correctCount / dueCards.length) * 100);
-
-                showResults({ score, strengths, weaknesses });
             }
 
             function showResults(result) {
@@ -972,14 +1037,13 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                 const cardResults = dueCards.map((card, i) => {
                     const q    = questions[i];
                     const a    = answers[i];
-                    const r    = Math.min(4, Math.max(1, a.rating || 2));
+                    const r    = Math.min(4, Math.max(1, (result.grades && result.grades[i] ? result.grades[i].rating : 2)));
+                    const comment = result.grades && result.grades[i] ? result.grades[i].comment : '';
                     const newFSRS = deck.sources[card.srcIdx].chunks[card.chunkIdx].fsrs;
 
-                    let userAnswerText = '';
-                    if (q.type === 'mcq' || q.type === 'true_false' || q.type === 'fill_blank') {
-                        userAnswerText = `Your Answer: "${a.text || '(none)'}" · ${a.firstTryCorrect ? '✅ Correct' : '❌ Incorrect'}`;
-                    } else {
-                        userAnswerText = `Your Answer: "${a.text || '(none)'}"`;
+                    let userAnswerText = `Your Answer: "${a.text || '(none)'}"`;
+                    if (q.type === 'mcq' || q.type === 'cloze') {
+                        userAnswerText += ` · ${a.firstTryCorrect ? '✅ Correct' : '❌ Incorrect'}`;
                     }
 
                     return `
@@ -994,6 +1058,7 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                         <div class="fsr-result-q"><strong>Q:</strong> ${escHTML(q.question)}</div>
                         <div class="fsr-result-comment" style="margin-top: 2px;">${escHTML(userAnswerText)}</div>
                         <div class="fsr-result-comment" style="opacity:0.85;"><strong>Correct answer:</strong> ${escHTML(q.correctAnswer)}</div>
+                        ${comment ? `<div class="fsr-result-comment" style="color:var(--primary-color); font-weight: 500;"><strong>Evaluation:</strong> ${escHTML(comment)}</div>` : ''}
                         ${q.explanation ? `<div class="fsr-result-comment" style="font-style: italic; border-top:1px dashed var(--border-color); padding-top:4px; margin-top:4px;">${escHTML(q.explanation)}</div>` : ''}
                     </div>`;
                 }).join('');
@@ -1009,10 +1074,12 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
                         <text x="36" y="41" text-anchor="middle" font-size="13" font-weight="800" fill="${scoreColor}">${score}%</text>
                     </svg>
                     <div class="fsr-score-info">
-                        <div class="fsr-score-pct">${score >= 80 ? '🎉 Exceptional Study!' : score >= 55 ? '📈 Strong Effort!' : '💪 Keep Learning!'}</div>
-                        <div class="fsr-score-sub">${dueCards.length} card${dueCards.length > 1 ? 's' : ''} reviewed · FSRS memory states updated.</div>
+                        <div class="fsr-score-pct">${score >= 80 ? '🎉 Study Completed!' : score >= 55 ? '📈 Solid Effort!' : '💪 Practice makes perfect!'}</div>
+                        <div class="fsr-score-sub">${dueCards.length} card${dueCards.length > 1 ? 's' : ''} reviewed · FSRS states synced.</div>
                     </div>
                 </div>
+
+                ${result.feedback ? `<div class="fsr-feedback-box">💬 ${escHTML(result.feedback)}</div>` : ''}
 
                 ${strengthList ? `<div class="fsr-section-title">Mastered Concepts</div><div class="fsr-weakness-list">${strengthList}</div>` : ''}
                 ${weakList ? `<div class="fsr-section-title">Concepts to Focus On</div><div class="fsr-weakness-list">${weakList}</div>` : ''}
@@ -1024,7 +1091,7 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
 
                 container.querySelector('#fsrRestartBtn').addEventListener('click', () => {
                     currentIdx = 0; answers = []; questions = []; dueCards = [];
-                    startDiscover();
+                    showSetupScreen();
                 });
             }
 
@@ -1034,7 +1101,7 @@ Return ONLY a valid JSON object matching this structure (no markdown wrapper, no
             }
 
             /* ── kick off ── */
-            startDiscover();
+            showSetupScreen();
         }
     };
 
