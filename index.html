@@ -349,6 +349,7 @@
     <script src="tools/magicTodo.js"></script>
     <script src="tools/htmlSimulator.js"></script>
     <script src="tools/mermaidVisualizer.js"></script>
+    <script src="tools/fsrsReview.js"></script>
 
     <!-- Interactivity & PWA Script -->
     <script>
@@ -1037,6 +1038,7 @@
 
         // Decks State Management
         let decks = [];
+        window.decks = decks; // expose for isolated tools
         let currentActiveDeckId = null;
 
         async function loadDecks() {
@@ -1051,10 +1053,12 @@
         async function saveDecks() {
             try {
                 await dbStore.set('decks', decks);
+                window.decks = decks; // keep reference in sync
             } catch (e) {
                 console.error('[Decks] Error saving decks:', e);
             }
         }
+        window.saveDecks = saveDecks; // expose for isolated tools
 
         function escapeHTML(str) {
             return str.replace(/[&<>'"]/g, 
