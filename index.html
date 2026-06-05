@@ -1359,22 +1359,42 @@
             return Array.from(output.data);
         }
 
-        function chunkText(text, maxLength = 500, overlap = 100) {
+        function chunkText(text, maxLength = 500) {
+            const paragraphs = text.split(/\n\n+/);
             const chunks = [];
-            let start = 0;
-            while (start < text.length) {
-                let end = start + maxLength;
-                if (end < text.length) {
-                    const nextSpace = text.indexOf(' ', end);
-                    if (nextSpace !== -1 && nextSpace - end < 30) {
-                        end = nextSpace;
+            let currentChunk = "";
+
+            for (let para of paragraphs) {
+                para = para.trim();
+                if (!para) continue;
+
+                if (para.length > maxLength) {
+                    if (currentChunk) {
+                        chunks.push(currentChunk.trim());
+                        currentChunk = "";
                     }
+
+                    const sentences = para.split(/(?<=[.!?])\s+/);
+                    let sentenceBuffer = "";
+
+                    for (const sentence of sentences) {
+                        if ((sentenceBuffer + sentence).length > maxLength) {
+                            if (sentenceBuffer) chunks.push(sentenceBuffer.trim());
+                            sentenceBuffer = sentence;
+                        } else {
+                            sentenceBuffer += (sentenceBuffer ? " " : "") + sentence;
+                        }
+                    }
+                    if (sentenceBuffer) chunks.push(sentenceBuffer.trim());
+                } else if ((currentChunk + "\n\n" + para).length > maxLength) {
+                    if (currentChunk) chunks.push(currentChunk.trim());
+                    currentChunk = para;
+                } else {
+                    currentChunk += (currentChunk ? "\n\n" : "") + para;
                 }
-                chunks.push(text.slice(start, end).trim());
-                start = end - overlap;
-                if (start < 0) start = 0;
-                if (end >= text.length) break;
             }
+
+            if (currentChunk) chunks.push(currentChunk.trim());
             return chunks;
         }
 
