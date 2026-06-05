@@ -1,4 +1,4 @@
-const CACHE_NAME = 'neurospark-cache-v24';
+const CACHE_NAME = 'neurospark-cache-v25';
 const ASSETS = [
   './',
   './index.html',

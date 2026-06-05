@@ -92,7 +92,7 @@
                     // 1. Get embedding model name
                     const modelName = typeof window.getSelectedEmbeddingModel === 'function' 
                         ? await window.getSelectedEmbeddingModel() 
-                        : 'onnx-community/all-MiniLM-L6-v2-ONNX';
+                        : 'Xenova/all-MiniLM-L6-v2';
 
                     // 2. Compute query embedding vector
                     if (typeof window.computeEmbedding !== 'function') {
