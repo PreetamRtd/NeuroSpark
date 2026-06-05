@@ -592,31 +592,8 @@
                         await cache.put(url, responseWithStream);
 
                     } catch (fetchErr) {
-                        console.warn(`[Downloader] Real fetch failed for ${url}, running high-fidelity simulation:`, fetchErr);
-                        const simTotal = totalEstimatedSize;
-                        
-                        while (loadedBytesAllFiles < simTotal) {
-                            await new Promise(r => setTimeout(r, 60));
-                            const chunk = Math.floor(Math.random() * 4 * 1024 * 1024) + 2 * 1024 * 1024;
-                            loadedBytesAllFiles = Math.min(simTotal, loadedBytesAllFiles + chunk);
-                            
-                            const percent = Math.floor((loadedBytesAllFiles / simTotal) * 100);
-                            downloadProgressPercent.textContent = `${percent}%`;
-                            downloadProgressBar.style.width = `${percent}%`;
-                            
-                            const loadedMB = (loadedBytesAllFiles / (1024 * 1024)).toFixed(1);
-                            const totalMB = (simTotal / (1024 * 1024)).toFixed(1);
-                            downloadProgressBytes.textContent = `${loadedMB} MB / ${totalMB} MB`;
-
-                            const elapsedSeconds = (Date.now() - startTime) / 1000;
-                            const speed = elapsedSeconds > 0 ? (loadedBytesAllFiles / (1024 * 1024) / elapsedSeconds).toFixed(1) : '0';
-                            downloadProgressSpeed.textContent = `${speed} MB/s`;
-                        }
-
-                        const mockResponse = new Response(new Uint8Array(1024 * 1024), {
-                            headers: { 'Content-Type': 'application/octet-stream' }
-                        });
-                        await cache.put(url, mockResponse);
+                        console.error(`[Downloader] Fetch failed for ${url}:`, fetchErr);
+                        throw new Error(`Failed to download ${filename} from Hugging Face. Please verify your internet connection, or check if the repository "${repoName}" is public and does not require gate approval.`);
                     }
                 }
 
@@ -964,7 +941,13 @@
                     // Hide download progress container
                     downloadProgressContainer.style.display = 'none';
 
-                    alert('All credentials and folder paths cleared.');
+                    // Clear the PWA models cache to remove any corrupted files
+                    if ('caches' in window) {
+                        await caches.delete('neurospark-models-cache');
+                        console.log('[Settings] Cleared local models cache');
+                    }
+
+                    alert('All credentials, folder paths, and local model caches cleared successfully!');
                 } catch (err) {
                     console.error('[Settings] Error clearing config:', err);
                 }
