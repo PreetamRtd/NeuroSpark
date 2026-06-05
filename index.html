@@ -194,6 +194,15 @@
                             <button type="button" id="testModelBtn" class="test-model-btn">Test</button>
                         </div>
                     </div>
+
+                    <!-- API Embedding Model Input -->
+                    <div class="form-group" style="margin-top: 16px;">
+                        <label for="apiEmbeddingModel">Embedding Model</label>
+                        <div class="api-model-input-wrapper">
+                            <input type="text" id="apiEmbeddingModel" placeholder="e.g. text-embedding-004" autocomplete="off">
+                            <button type="button" id="testEmbeddingModelBtn" class="test-model-btn">Test</button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Local WebGPU Group -->
@@ -368,6 +377,7 @@
         const apiProvider = document.getElementById('apiProvider');
         const apiKey = document.getElementById('apiKey');
         const apiModel = document.getElementById('apiModel');
+        const apiEmbeddingModel = document.getElementById('apiEmbeddingModel');
         const toggleKeyVisibility = document.getElementById('toggleKeyVisibility');
         const clearSettingsBtn = document.getElementById('clearSettingsBtn');
 
@@ -741,12 +751,19 @@
         const placeholdersByProvider = {
             gemini: 'e.g. gemini-1.5-flash',
             openai: 'e.g. gpt-4o-mini',
-            anthropic: 'e.g. claude-3-5-sonnet'
+            anthropic: 'e.g. claude-3-5-sonnet-20240620'
+        };
+
+        const embeddingPlaceholdersByProvider = {
+            gemini: 'e.g. text-embedding-004',
+            openai: 'e.g. text-embedding-3-small',
+            anthropic: 'e.g. text-embedding-ada-002 (Optional / OpenAI Key)'
         };
 
         function updateModelPlaceholder() {
             const provider = apiProvider.value;
             apiModel.placeholder = placeholdersByProvider[provider] || 'Enter model name';
+            apiEmbeddingModel.placeholder = embeddingPlaceholdersByProvider[provider] || 'Enter embedding model name';
         }
 
         apiProvider.addEventListener('change', updateModelPlaceholder);
@@ -810,7 +827,58 @@
             }
         }
 
+        // Test if embedding model exists
+        async function testEmbeddingModel() {
+            const provider = apiProvider.value;
+            const key = apiKey.value.trim();
+            const model = apiEmbeddingModel.value.trim();
+
+            if (!key) {
+                alert('Please enter an API Key first.');
+                return;
+            }
+            if (!model) {
+                alert('Please enter an embedding model name to test.');
+                return;
+            }
+
+            const testBtn = document.getElementById('testEmbeddingModelBtn');
+            const originalText = testBtn.textContent;
+            testBtn.textContent = 'Testing...';
+            testBtn.disabled = true;
+
+            try {
+                let isValid = false;
+                if (provider === 'gemini') {
+                    const formattedModel = model.includes('/') ? model : `models/${model}`;
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${formattedModel}?key=${key}`);
+                    isValid = res.ok;
+                } else if (provider === 'openai') {
+                    const res = await fetch(`https://api.openai.com/v1/models/${model}`, {
+                        headers: { 'Authorization': `Bearer ${key}` }
+                    });
+                    isValid = res.ok;
+                } else if (provider === 'anthropic') {
+                    alert('Anthropic Claude does not provide a native embedding API. To use online embeddings, please switch API Provider to Google Gemini or OpenAI. Alternatively, use Local WebGPU mode for free offline embeddings.');
+                    return;
+                }
+
+                if (isValid) {
+                    alert(`Success: Embedding model "${model}" is valid and accessible!`);
+                } else {
+                    alert(`Error: Embedding model "${model}" could not be verified. Please check name and API key.`);
+                }
+            } catch (err) {
+                console.error('[PWA Embedding API Test]', err);
+                alert('Connection failed. Please check network or API details.');
+            } finally {
+                testBtn.textContent = originalText;
+                testBtn.disabled = false;
+            }
+        }
+
         document.getElementById('testModelBtn').addEventListener('click', testModel);
+        document.getElementById('testEmbeddingModelBtn').addEventListener('click', testEmbeddingModel);
 
         // Settings load, save and clear handlers using dbStore (IndexedDB)
         async function loadSettings() {
@@ -830,6 +898,7 @@
                     updateModelPlaceholder();
                     if (config.key) apiKey.value = config.key;
                     if (config.model) apiModel.value = config.model;
+                    if (config.embeddingModel) apiEmbeddingModel.value = config.embeddingModel;
                 } else {
                     updateModelPlaceholder();
                 }
@@ -874,7 +943,8 @@
             const config = {
                 provider: apiProvider.value,
                 key: apiKey.value,
-                model: apiModel.value
+                model: apiModel.value,
+                embeddingModel: apiEmbeddingModel.value.trim()
             };
             const localConfig = {
                 embeddingModel: embeddingModel.value,
@@ -923,6 +993,7 @@
                     apiProvider.value = 'gemini';
                     apiKey.value = '';
                     apiModel.value = '';
+                    apiEmbeddingModel.value = '';
                     updateModelPlaceholder();
 
                     localModelDir.value = '';
@@ -1216,7 +1287,66 @@
         }
 
         async function computeEmbedding(text, modelName) {
-            const pipe = await getEmbeddingPipeline(modelName);
+            try {
+                const mode = await dbStore.get('executionMode') || 'cloud';
+                if (mode === 'cloud') {
+                    const apiConfig = await dbStore.get('apiConfig');
+                    if (apiConfig && apiConfig.key) {
+                        const provider = apiConfig.provider || 'gemini';
+                        const key = apiConfig.key;
+                        
+                        if (provider === 'gemini') {
+                            const formattedModel = modelName.includes('/') ? modelName : `models/${modelName}`;
+                            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${formattedModel}:embedContent?key=${key}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    content: {
+                                        parts: [{ text: text }]
+                                    }
+                                })
+                            });
+                            if (!res.ok) {
+                                throw new Error(`Gemini Embedding API returned status ${res.status}`);
+                            }
+                            const data = await res.json();
+                            if (data.embedding && data.embedding.values) {
+                                return data.embedding.values;
+                            }
+                            throw new Error('Invalid response structure from Gemini Embedding API');
+                        } else if (provider === 'openai') {
+                            const res = await fetch('https://api.openai.com/v1/embeddings', {
+                                method: 'POST',
+                                headers: {
+                                    'Authorization': `Bearer ${key}`,
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    input: text,
+                                    model: modelName
+                                })
+                            });
+                            if (!res.ok) {
+                                throw new Error(`OpenAI Embedding API returned status ${res.status}`);
+                            }
+                            const data = await res.json();
+                            if (data.data && data.data[0] && data.data[0].embedding) {
+                                return data.data[0].embedding;
+                            }
+                            throw new Error('Invalid response structure from OpenAI Embedding API');
+                        }
+                    }
+                }
+            } catch (cloudErr) {
+                console.warn("[Embeddings] Cloud embedding failed, falling back to local computation:", cloudErr);
+            }
+
+            // Fallback to Local WebGPU / CPU computation (Transformers.js)
+            let localModelName = modelName;
+            if (modelName.startsWith('text-embedding') || modelName.includes('gemini') || modelName.includes('openai') || modelName.includes('claude')) {
+                localModelName = 'Xenova/all-MiniLM-L6-v2';
+            }
+            const pipe = await getEmbeddingPipeline(localModelName);
             const output = await pipe(text, { pooling: 'mean', normalize: true });
             return Array.from(output.data);
         }
@@ -1242,12 +1372,22 @@
 
         async function getSelectedEmbeddingModel() {
             try {
-                const localConfig = await dbStore.get('localModelConfig');
-                if (localConfig) {
-                    if (localConfig.embeddingModel === 'custom' && localConfig.customEmbeddingModel) {
-                        return localConfig.customEmbeddingModel;
+                const mode = await dbStore.get('executionMode') || 'cloud';
+                if (mode === 'cloud') {
+                    const apiConfig = await dbStore.get('apiConfig');
+                    if (apiConfig && apiConfig.embeddingModel) {
+                        return apiConfig.embeddingModel;
                     }
-                    return localConfig.embeddingModel || 'Xenova/all-MiniLM-L6-v2';
+                    const provider = apiConfig ? apiConfig.provider : 'gemini';
+                    return provider === 'openai' ? 'text-embedding-3-small' : 'text-embedding-004';
+                } else {
+                    const localConfig = await dbStore.get('localModelConfig');
+                    if (localConfig) {
+                        if (localConfig.embeddingModel === 'custom' && localConfig.customEmbeddingModel) {
+                            return localConfig.customEmbeddingModel;
+                        }
+                        return localConfig.embeddingModel || 'Xenova/all-MiniLM-L6-v2';
+                    }
                 }
             } catch(e) {}
             return 'Xenova/all-MiniLM-L6-v2';
