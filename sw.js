@@ -1,4 +1,4 @@
-const CACHE_NAME = 'neurospark-cache-v31';
+const CACHE_NAME = 'neurospark-cache-v33';
 const ASSETS = [
   './',
   './index.html',
@@ -10,10 +10,11 @@ const ASSETS = [
   './tools/magicTodo.js',
   './tools/aiChatTutor.js',
   './tools/mermaidVisualizer.js',
-  './tools/fsrsReview.js',
   './tools/focusReader.js',
+  './tools/spacedRepetition.js',
   './assets/icon-192.png',
   './assets/icon-512.png',
+  'https://cdn.jsdelivr.net/npm/dexie@4.0.1/dist/dexie.min.js',
   'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js',
   'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js',
   'https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/tesseract.min.js'

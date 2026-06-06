@@ -1,6 +1,6 @@
 /**
- * NeuroSpark Tool: Mermaid Diagram Visualizer
- * Render flowcharts, sequences, ER diagrams and more from syntax or AI.
+ * NeuroSpark Tool: Mermaid Diagram Visualizer (RAG-Grounded)
+ * Renders flowcharts, sequences, ER diagrams, and mindmaps grounded in deck source data.
  * Isolated IIFE — lazy-loads Mermaid.js from CDN only when needed.
  */
 (function () {
@@ -8,28 +8,18 @@
 
     const TOOL_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="16" y="3" width="5" height="5" rx="1"/><rect x="9" y="16" width="6" height="5" rx="1"/><line x1="5.5" y1="8" x2="5.5" y2="13"/><line x1="18.5" y1="8" x2="18.5" y2="13"/><line x1="5.5" y1="13" x2="18.5" y2="13"/><line x1="12" y1="13" x2="12" y2="16"/></svg>`;
 
-    /* ─── Diagram starters ─── */
-    const STARTERS = {
-        flowchart:  `flowchart TD\n    A([Start]) --> B{Decision}\n    B -->|Yes| C[Do Action]\n    B -->|No| D([End])`,
-        sequence:   `sequenceDiagram\n    participant C as Client\n    participant S as Server\n    C->>S: HTTP Request\n    S-->>C: HTTP Response`,
-        gantt:      `gantt\n    title Project Plan\n    dateFormat YYYY-MM-DD\n    section Phase 1\n    Design  :a1, 2024-01-01, 7d\n    Dev     :after a1, 14d`,
-        class:      `classDiagram\n    class Animal {\n        +name: string\n        +speak() string\n    }\n    class Dog {\n        +fetch()\n    }\n    Animal <|-- Dog`,
-        er:         `erDiagram\n    USER ||--o{ ORDER : places\n    ORDER ||--|{ ITEM : contains\n    USER { string name\n           string email }`,
-        pie:        `pie title Browser Share\n    "Chrome" : 65\n    "Firefox" : 15\n    "Safari" : 12\n    "Other" : 8`,
-        mindmap:    `mindmap\n  root((Core Topic))\n    Branch A\n      Leaf 1\n      Leaf 2\n    Branch B\n      Leaf 3`
-    };
-
-    const DEFAULT_DIAGRAM = `flowchart TD
-    A([Open NeuroSpark]) --> B{Execution Mode}
-    B -->|Cloud API| C[Configure API Key]
-    B -->|Local WebGPU| D[Download Model]
-    C --> E[Upload Documents]
-    D --> E
-    E --> F[Use Tools]
-    F --> G[RAG Search]
-    F --> H[Magic Todo]
-    F --> I[HTML Simulator]
-    F --> J([Mermaid Diagrams])`;
+    /* ─── Cosine similarity for RAG search ─── */
+    function cosineSimilarity(vecA, vecB) {
+        if (!vecA || !vecB || vecA.length !== vecB.length || vecA.length === 0) return 0;
+        let dotProduct = 0.0, normA = 0.0, normB = 0.0;
+        for (let i = 0; i < vecA.length; i++) {
+            dotProduct += vecA[i] * vecB[i];
+            normA += vecA[i] * vecA[i];
+            normB += vecB[i] * vecB[i];
+        }
+        if (normA === 0 || normB === 0) return 0;
+        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
 
     /* ─── Lazy-load Mermaid from CDN ─── */
     let mermaidReady = false;
@@ -56,7 +46,7 @@
                 mermaidReady = true;
                 resolve(window.mermaid);
             };
-            s.onerror = () => reject(new Error('Failed to load Mermaid.js from CDN. Check your internet connection.'));
+            s.onerror = () => reject(new Error('Failed to load Mermaid.js from CDN. Check connection.'));
             document.head.appendChild(s);
         });
     }
@@ -73,7 +63,7 @@
             if (svgEl) { svgEl.style.maxWidth = '100%'; svgEl.style.height = 'auto'; }
         } catch (err) {
             console.error('[MermaidViz] render error:', err);
-            outputEl.innerHTML = `<div class="mm-error">⚠️ ${err.message || 'Invalid Mermaid syntax. Check your diagram code.'}</div>`;
+            outputEl.innerHTML = `<div class="mm-error">⚠️ ${err.message || 'Invalid Mermaid syntax. Try generating again.'}</div>`;
         }
     }
 
@@ -88,7 +78,7 @@
         URL.revokeObjectURL(url);
     }
 
-    /* ─── AI helper ─── */
+    /* ─── AI Fetch helper ─── */
     async function callAI(prompt) {
         try {
             const apiConfig = await (window.dbStore ? window.dbStore.get('apiConfig') : Promise.resolve(null));
@@ -126,10 +116,10 @@
                 }
             }
         } catch (e) { console.warn('[MermaidViz] AI error:', e); }
-        throw new Error('No AI provider configured. Set up an API key in Settings → Cloud API (Online).');
+        throw new Error('No AI provider configured. Set up an API key in Settings → Cloud API.');
     }
 
-    /* ─── Strip AI fences ─── */
+    /* ─── Clean raw response code ─── */
     function parseMermaid(raw) {
         return raw.trim()
             .replace(/^```[a-z]*\n?/i, '')
@@ -140,12 +130,10 @@
     const toolDefinition = {
         id: 'mermaid-visualizer',
         name: 'Mermaid Diagrams',
-        description: 'Render flowcharts, sequences, ER diagrams from syntax or AI description.',
+        description: 'Generate flowcharts, sequences, ER diagrams, and mindmaps grounded in your sources using RAG.',
         icon: TOOL_ICON,
 
         render(container, deck, onBack) {
-            let activeTab   = 'editor';
-            let editorCode  = DEFAULT_DIAGRAM;
             let lastGenCode = '';
 
             container.innerHTML = `
@@ -155,23 +143,12 @@
 .mm-title { display:flex; align-items:center; gap:8px; }
 .mm-title h4 { font-size:.875rem; font-weight:600; color:var(--text-color); margin:0; }
 .mm-back { background:none; border:1px solid var(--border-color); border-radius:4px; padding:4px 10px; font-size:.75rem; color:var(--text-muted); cursor:pointer; }
-.mm-tabs { display:flex; gap:6px; flex-shrink:0; }
-.mm-tab { padding:6px 14px; border-radius:6px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-muted); font-size:.8125rem; cursor:pointer; transition:all .15s; }
-.mm-tab.active { border-color:var(--primary-color); color:var(--primary-color); font-weight:600; }
 .mm-panel { display:flex; flex-direction:column; gap:10px; flex:1; min-height:0; }
-.mm-panel.hidden { display:none; }
-.mm-type-row { display:flex; gap:5px; flex-wrap:wrap; flex-shrink:0; }
-.mm-type-label { font-size:.6875rem; color:var(--text-muted); align-self:center; white-space:nowrap; }
-.mm-type-btn { padding:4px 10px; border-radius:20px; border:1px solid var(--border-color); background:none; color:var(--text-muted); font-size:.6875rem; cursor:pointer; transition:all .12s; }
-.mm-type-btn:hover { color:var(--primary-color); border-color:var(--primary-color); }
-.mm-code { width:100%; height:160px; padding:10px 12px; border-radius:8px; border:1px solid var(--border-color); background:#0d0d0d; color:#e2e8f0; font-size:.78rem; font-family:'Fira Mono',monospace; resize:none; outline:none; line-height:1.6; flex-shrink:0; transition:border-color .15s; }
-.mm-code:focus { border-color:var(--primary-color); }
 .mm-btn-row { display:flex; gap:8px; align-items:center; flex-shrink:0; }
 .mm-render-btn { padding:7px 18px; border-radius:7px; border:none; background:var(--primary-color); color:#fff; font-size:.8125rem; font-weight:600; cursor:pointer; transition:opacity .15s; }
 .mm-render-btn:disabled { opacity:.5; cursor:not-allowed; }
-.mm-clear-btn, .mm-export-btn, .mm-copy-btn { padding:7px 13px; border-radius:7px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-muted); font-size:.8125rem; cursor:pointer; transition:all .12s; }
-.mm-clear-btn:hover, .mm-export-btn:hover, .mm-copy-btn:hover { color:var(--text-color); border-color:var(--text-muted); }
-.mm-hint { margin-left:auto; font-size:.6875rem; color:var(--text-muted); }
+.mm-copy-btn, .mm-export-btn { padding:7px 13px; border-radius:7px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-muted); font-size:.8125rem; cursor:pointer; transition:all .12s; }
+.mm-copy-btn:hover, .mm-export-btn:hover { color:var(--text-color); border-color:var(--text-muted); }
 .mm-preview { flex:1; min-height:0; border-radius:8px; overflow:auto; border:1px solid var(--border-color); background:var(--bg-input); display:flex; align-items:flex-start; justify-content:center; padding:16px; }
 .mm-svg-wrap { width:100%; }
 .mm-svg-wrap svg { display:block; margin:0 auto; }
@@ -197,47 +174,14 @@
     <button class="mm-back" id="mmBack">← Back</button>
   </div>
 
-  <div class="mm-tabs">
-    <button class="mm-tab active" data-tab="editor">✏️ Editor</button>
-    <button class="mm-tab" data-tab="ai">🤖 AI Generate</button>
-  </div>
-
-  <!-- Editor Panel -->
-  <div class="mm-panel" id="mmEditorPanel">
-    <div class="mm-type-row">
-      <span class="mm-type-label">Insert:</span>
-      <button class="mm-type-btn" data-starter="flowchart">Flowchart</button>
-      <button class="mm-type-btn" data-starter="sequence">Sequence</button>
-      <button class="mm-type-btn" data-starter="gantt">Gantt</button>
-      <button class="mm-type-btn" data-starter="class">Class</button>
-      <button class="mm-type-btn" data-starter="er">ER</button>
-      <button class="mm-type-btn" data-starter="pie">Pie</button>
-      <button class="mm-type-btn" data-starter="mindmap">Mindmap</button>
-    </div>
-    <textarea class="mm-code" id="mmCodeArea" spellcheck="false"></textarea>
-    <div class="mm-btn-row">
-      <button class="mm-render-btn" id="mmRenderBtn">▶ Render</button>
-      <button class="mm-clear-btn" id="mmClearBtn">🗑️ Clear</button>
-      <button class="mm-export-btn" id="mmExportBtn">💾 Export SVG</button>
-      <span class="mm-hint">Ctrl+Enter to render</span>
-    </div>
-    <div class="mm-preview" id="mmEditorPreview">
-      <div class="mm-placeholder">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="16" y="3" width="5" height="5" rx="1"/><rect x="9" y="16" width="6" height="5" rx="1"/><line x1="5.5" y1="8" x2="5.5" y2="13"/><line x1="18.5" y1="8" x2="18.5" y2="13"/><line x1="5.5" y1="13" x2="18.5" y2="13"/><line x1="12" y1="13" x2="12" y2="16"/></svg>
-        <span>Click ▶ Render to preview your diagram.</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- AI Panel -->
-  <div class="mm-panel hidden" id="mmAIPanel">
-    <textarea class="mm-ai-desc" id="mmAIDesc" placeholder="Describe the diagram you need…&#10;e.g. User login flow · Database schema for a blog · Project timeline · Microservices architecture"></textarea>
+  <!-- AI Generator Panel -->
+  <div class="mm-panel" id="mmAIPanel">
+    <textarea class="mm-ai-desc" id="mmAIDesc" placeholder="Describe the diagram you want to generate…&#10;e.g. Code execution sequence · Database entity relationships · App architecture flowchart"></textarea>
     <div class="mm-examples">
       <span class="mm-ex-label">Try:</span>
-      <button class="mm-ex-btn">User login sequence</button>
-      <button class="mm-ex-btn">E-commerce class diagram</button>
-      <button class="mm-ex-btn">CI/CD pipeline flow</button>
-      <button class="mm-ex-btn">REST API lifecycle</button>
+      <button class="mm-ex-btn">Concept summary flowchart</button>
+      <button class="mm-ex-btn">Entity relationships mapping</button>
+      <button class="mm-ex-btn">Step-by-step logic sequence</button>
     </div>
     <div class="mm-btn-row">
       <button class="mm-render-btn" id="mmGenBtn">✨ Generate</button>
@@ -247,7 +191,7 @@
     <div class="mm-preview" id="mmAIPreview">
       <div class="mm-placeholder">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="16" y="3" width="5" height="5" rx="1"/><rect x="9" y="16" width="6" height="5" rx="1"/><line x1="5.5" y1="8" x2="5.5" y2="13"/><line x1="18.5" y1="8" x2="18.5" y2="13"/><line x1="5.5" y1="13" x2="18.5" y2="13"/><line x1="12" y1="13" x2="12" y2="16"/></svg>
-        <span>Describe a diagram and click Generate.</span>
+        <span>Describe a diagram. AI will extract relevant document info using RAG and build it.</span>
       </div>
     </div>
   </div>
@@ -256,57 +200,7 @@
             /* ── Back ── */
             container.querySelector('#mmBack').addEventListener('click', onBack);
 
-            /* ── Tab switching ── */
-            container.querySelectorAll('.mm-tab').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    activeTab = btn.dataset.tab;
-                    container.querySelectorAll('.mm-tab').forEach(b => b.classList.remove('active'));
-                    btn.classList.add('active');
-                    container.querySelector('#mmEditorPanel').classList.toggle('hidden', activeTab !== 'editor');
-                    container.querySelector('#mmAIPanel').classList.toggle('hidden', activeTab !== 'ai');
-                });
-            });
-
-            /* ── Code area & starter ── */
-            const codeArea    = container.querySelector('#mmCodeArea');
-            const editorPrev  = container.querySelector('#mmEditorPreview');
-            codeArea.value = editorCode;
-
-            container.querySelectorAll('.mm-type-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    codeArea.value = STARTERS[btn.dataset.starter] || '';
-                    editorCode = codeArea.value;
-                });
-            });
-
-            /* ── Render editor ── */
-            const renderBtn = container.querySelector('#mmRenderBtn');
-            async function doRender() {
-                editorCode = codeArea.value.trim();
-                if (!editorCode) return;
-                renderBtn.disabled = true;
-                await renderDiagram(editorCode, editorPrev);
-                renderBtn.disabled = false;
-            }
-            renderBtn.addEventListener('click', doRender);
-            codeArea.addEventListener('keydown', e => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doRender(); }
-                if (e.key === 'Tab') { e.preventDefault(); const s = codeArea.selectionStart; codeArea.value = codeArea.value.slice(0, s) + '  ' + codeArea.value.slice(codeArea.selectionEnd); codeArea.selectionStart = codeArea.selectionEnd = s + 2; }
-            });
-
-            /* ── Clear ── */
-            container.querySelector('#mmClearBtn').addEventListener('click', () => {
-                codeArea.value = ''; editorCode = '';
-                editorPrev.innerHTML = `<div class="mm-placeholder"><span>Code cleared.</span></div>`;
-            });
-
-            /* ── Export (editor) ── */
-            container.querySelector('#mmExportBtn').addEventListener('click', () => exportSVG(editorPrev));
-
-            /* ── Auto-render default on load ── */
-            renderDiagram(DEFAULT_DIAGRAM, editorPrev);
-
-            /* ── AI Generate ── */
+            /* ── AI Generate elements ── */
             const genBtn      = container.querySelector('#mmGenBtn');
             const copyBtn     = container.querySelector('#mmCopyBtn');
             const aiExportBtn = container.querySelector('#mmAIExportBtn');
@@ -322,30 +216,73 @@
                 copyBtn.disabled = true;
                 aiExportBtn.disabled = true;
 
-                aiPreview.innerHTML = `<div class="mm-spinner"><div class="mm-dot"></div><span>AI is designing your diagram…</span></div>`;
+                aiPreview.innerHTML = `<div class="mm-spinner"><div class="mm-dot"></div><span>AI is matching vector sources and designing your diagram…</span></div>`;
 
                 try {
-                    const prompt = `You are a Mermaid diagram expert. Generate a valid Mermaid v10 diagram for the following description:
+                    // 1. Fetch relevant context using RAG
+                    let ragContext = "";
+                    const modelName = typeof window.getSelectedEmbeddingModel === 'function' 
+                        ? await window.getSelectedEmbeddingModel() 
+                        : 'Xenova/all-MiniLM-L6-v2';
 
+                    if (typeof window.computeEmbedding === 'function' && deck.sources && deck.sources.length > 0) {
+                        aiPreview.querySelector('span').textContent = 'Vectorizing query & querying documents...';
+                        const queryVector = await window.computeEmbedding(desc, modelName);
+                        const matches = [];
+
+                        deck.sources.forEach(source => {
+                            if (source.chunks) {
+                                source.chunks.forEach(chunk => {
+                                    if (chunk.embedding && chunk.embedding.length > 0) {
+                                        const score = cosineSimilarity(queryVector, chunk.embedding);
+                                        matches.push({ text: chunk.text, score });
+                                    }
+                                });
+                            }
+                        });
+
+                        matches.sort((a, b) => b.score - a.score);
+                        const topMatches = matches.slice(0, 5); // retrieve top 5 most relevant segments
+                        
+                        if (topMatches.length > 0 && topMatches[0].score > 0.1) {
+                            ragContext = topMatches.map(m => m.text).join('\n\n');
+                        }
+                    }
+
+                    // 2. Formulate prompt with RAG grounding
+                    aiPreview.querySelector('span').textContent = 'Generating Mermaid diagram syntax...';
+                    const prompt = `You are a Mermaid diagram visualizer. Generate a valid Mermaid v10 diagram based on the reference materials and user description.
+
+Reference Material:
+${ragContext || "(No matching files context found)"}
+
+User Request:
 "${desc}"
 
 Rules:
 - Output ONLY the raw Mermaid code. No markdown fences, no backticks, no explanation, no preamble.
-- Use correct Mermaid v10 syntax only.
-- Choose the most appropriate diagram type automatically.
-- Make it comprehensive, well-labelled, and easy to read.
-- Keep node/participant labels concise (under 30 characters each).
-- Use quotes around labels with spaces or special characters.`;
+- Choose the most appropriate diagram type (flowchart, sequenceDiagram, classDiagram, erDiagram, gantt, pie, mindmap) to explain the concepts.
+- Use quotes around labels with spaces.`;
+
+                    // 3. Request syntax from LLM
+                    const apiConfig = await window.dbStore.get('apiConfig');
+                    const mode = await window.dbStore.get('executionMode') || 'cloud';
+                    
+                    let key = '', provider = 'local', model = '';
+                    if (mode === 'cloud' && apiConfig) {
+                        key = apiConfig.key || '';
+                        provider = apiConfig.provider || 'gemini';
+                        model = apiConfig.model || (provider === 'openai' ? 'gpt-4o-mini' : 'gemini-1.5-flash');
+                    }
 
                     const raw = await callAI(prompt);
                     lastGenCode = parseMermaid(raw);
 
-                    // Sync to editor textarea too
-                    codeArea.value = lastGenCode;
-                    editorCode     = lastGenCode;
-
+                    // 4. Render diagram
+                    aiPreview.querySelector('span').textContent = 'Rendering vector elements...';
                     await renderDiagram(lastGenCode, aiPreview);
-                    copyBtn.disabled    = false;
+                    
+                    copyBtn.disabled     = false;
                     aiExportBtn.disabled = false;
                 } catch (err) {
                     console.error('[MermaidViz] AI error:', err);
